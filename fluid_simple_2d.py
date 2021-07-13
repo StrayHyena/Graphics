@@ -1,6 +1,5 @@
 import taichi as ti
 import numpy as np
-import random
 import math
 
 ti.init(arch=ti.cpu)
@@ -15,7 +14,6 @@ neighbor_radius = 1.05*support_radius
 iteration_num = 5
 particle_num_x = 60  
 particle_num =particle_num_x*20
-# particle_num_solid = 1000
 max_neighbor_num = 40
 max_particle_in_cell = 100
 rho_0 = 1.0
@@ -25,8 +23,6 @@ lambda_epsilon = 100.0
 epsilon = 1e-5
 
 gravity = (0,-9.8)
-fluid_particle_init_pos = (10,2.8)
-
 resolution = (800,400) # 80m*40m
 world_to_screen_ratio = 10
 boundary = (resolution[0]/10,resolution[1]/10)
@@ -48,11 +44,11 @@ timeCnt    = ti.field(dtype  = ti.f32,shape = ())
 rhos       = ti.field(dtype  = ti.f32,shape = particle_num)
 
 @ti.func
-def confine_pos_to_boundary(p,tc):
-    right = 65.0 + 10.0*ti.sin(0.25*math.pi*tc)
-    left = 0/10 + particle_radius
-    bot  = 0/10 + particle_radius
-    top  = 400/10 - particle_radius
+def confine_pos_to_boundary(p,tc):   
+    right = 65.0 + 10.0*ti.sin(0.25*math.pi*tc) #tc : time count
+    left = 0 + particle_radius
+    bot  = 0 + particle_radius
+    top  = boundary[1] - particle_radius
     if p[0] < left:
         p[0] = left + ti.random()*epsilon
     elif p[0] >right :
@@ -178,6 +174,7 @@ def compute_delta_pos():
             pos_ji = pos_i-pos[p_j]
             delta_pos_i+=(lambda_i+lambdas[p_j]+compute_scorr(pos_ji))*spiky_grad(pos_ji,support_radius)
         pos_deltas[p_i] = delta_pos_i/rho_0
+        
 @ti.kernel
 def apply_delta_pos():
     for i in pos:
