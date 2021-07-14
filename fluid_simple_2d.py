@@ -34,6 +34,7 @@ last_pos  = ti.Vector.field(2,dtype= ti.f32,shape=particle_num)
 velocities = ti.Vector.field(2,dtype= ti.f32,shape=particle_num)
 pos_deltas = ti.Vector.field(2,dtype= ti.f32,shape=particle_num)
 lambdas    = ti.field(dtype = ti.f32,shape=particle_num)
+
 neighbors  = ti.field(dtype  = ti.i32,shape=(particle_num,max_neighbor_num))
 neighbor_num  = ti.field(dtype = ti.i32,shape = particle_num)
 grid_particle_num = ti.field(dtype  = ti.i32,shape = grid_total_size )
@@ -44,7 +45,7 @@ timeCnt    = ti.field(dtype  = ti.f32,shape = ())
 rhos       = ti.field(dtype  = ti.f32,shape = particle_num)
 
 @ti.func
-def confine_pos_to_boundary(p,tc):   
+def ConfinePositionToBoundary(p,tc):   
     right = 65.0 + 10.0*ti.sin(0.25*math.pi*tc) #tc : time count
     left = 0 + particle_radius
     bot  = 0 + particle_radius
@@ -60,7 +61,7 @@ def confine_pos_to_boundary(p,tc):
     return p
 
 @ti.func
-def poly6(r,h):
+def Poly6(r,h):
     ret = 0.0
     if 0.0 < r < h:
         x = (h*h - r*r)/(h*h*h)
@@ -68,7 +69,7 @@ def poly6(r,h):
     return ret
     
 @ti.func
-def spiky_grad(r,h):
+def SpikyGradient(r,h):
     ret = ti.Vector([0.0,0.0])
     rlen = r.norm()
     if 0.0 < rlen < h:
@@ -77,7 +78,7 @@ def spiky_grad(r,h):
     return ret
 
 @ti.kernel
-def initialize():
+def Initialize():
     for I in ti.grouped(grid_particle_num):
         grid_particle_num[I] = 0
     for I in ti.grouped(grid_to_particle):
@@ -97,21 +98,21 @@ def initialize():
         pos_deltas[i]   = ti.Vector([0.0,0.0])
 
 @ti.kernel
-def predict_pos():
+def PredictPosition():
     for i in pos:
         pos_i,vel_i = pos[i],velocities[i]
         vel_i += delta_t*ti.Vector([1.0,1.0])*gravity
         pos_i += delta_t*vel_i
-        pos[i] = confine_pos_to_boundary(pos_i,timeCnt[None])
+        pos[i] = ConfinePositionToBoundary(pos_i,timeCnt[None])
 
 @ti.kernel
-def confine_poss_to_boundary():
+def ConfinePositionsToBoundary():
     for i in pos:
         p = pos[i]
-        pos[i] = confine_pos_to_boundary(p,timeCnt[None])
+        pos[i] = ConfinePositionToBoundary(p,timeCnt[None])
 
 @ti.kernel
-def update_grid():
+def UpdateGrid():
     for I in ti.grouped(grid_particle_num):
         grid_particle_num[I] = 0
     for i in pos:
@@ -121,7 +122,7 @@ def update_grid():
 
 
 @ti.kernel
-def find_neighbors():
+def FindNeighbors():
     for i in pos:
         pos_i = pos[i]
         cell_i = int(pos_i/grid_cell_size)
@@ -139,7 +140,7 @@ def find_neighbors():
         neighbor_num[i] = neighbor_cnt                  
 
 @ti.kernel
-def compute_lambdas():
+def ComputeLambdas():
     for i in pos:
         pos_i = pos[i]
         grad_sqr_sum = 0.0
@@ -148,24 +149,24 @@ def compute_lambdas():
         for j in range(neighbor_num[i]):
             pos_j = pos[neighbors[i,j]]
             pos_ji = pos_i - pos_j
-            grad_j = spiky_grad(pos_ji,support_radius)/rho_0
+            grad_j = SpikyGradient(pos_ji,support_radius)/rho_0
             grad_sqr_sum+=grad_j.dot(grad_j)
             grad_i += grad_j
-            rho_i  += poly6(pos_ji.norm(),support_radius)
+            rho_i  += Poly6(pos_ji.norm(),support_radius)
         C_i = rho_i/rho_0 - 1.0
         grad_sqr_sum += grad_i.dot(grad_i)
         lambdas[i] = (-C_i)/(grad_sqr_sum + lambda_epsilon)
         rhos[i] = rho_i
 
 @ti.func
-def compute_scorr(pos_ji):
-    x = poly6(pos_ji.norm(),support_radius)/poly6(0.3*support_radius,support_radius)
+def ComputeScorr(pos_ji):
+    x = Poly6(pos_ji.norm(),support_radius)/Poly6(0.3*support_radius,support_radius)
     x = x*x
     x = x*x
     return (-corrK)*x
 
 @ti.kernel
-def compute_delta_pos():
+def ComputeDeltaPosition():
     for p_i in pos:
         pos_i       = pos[p_i]
         lambda_i    = lambdas[p_i]
@@ -173,43 +174,43 @@ def compute_delta_pos():
         for j in range(neighbor_num[p_i]):
             p_j = neighbors[p_i,j]
             pos_ji = pos_i-pos[p_j]
-            delta_pos_i+=(lambda_i+lambdas[p_j]+compute_scorr(pos_ji))*spiky_grad(pos_ji,support_radius)
+            delta_pos_i+=(lambda_i+lambdas[p_j]+ComputeScorr(pos_ji))*SpikyGradient(pos_ji,support_radius)
         pos_deltas[p_i] = delta_pos_i/rho_0
         
 @ti.kernel
-def apply_delta_pos():
+def ApplyDeltaPosition():
     for i in pos:
         pos[i]+=pos_deltas[i]
 
 @ti.kernel
-def compute_velocities():
+def UpdateVelocities():
     for i in velocities:
         velocities[i] = (pos[i]-last_pos[i])/delta_t
         last_pos[i]   = pos[i]
     timeCnt[None] += delta_t
 
-def debug_info():
+def LogInfo():
     rho_num = rhos.to_numpy()
     print(np.mean(rho_num),np.max(rho_num))
 
 def run_pbf():
-    predict_pos()
-    update_grid()
-    find_neighbors()
+    PredictPosition()
+    UpdateGrid()
+    FindNeighbors()
     for _ in range(iteration_num):
-        compute_lambdas()
-        compute_delta_pos()
-        apply_delta_pos()
-    confine_poss_to_boundary()
-    compute_velocities()
+        ComputeLambdas()
+        ComputeDeltaPosition()
+        ApplyDeltaPosition()
+    ConfinePositionsToBoundary()
+    UpdateVelocities()
     # debug_info()
 
-def main():
-    initialize()
+def Main():
+    Initialize()
     gui = ti.GUI('Position Based Fluid',res = resolution,background_color= 0xffffff)
     while not gui.get_event(gui.SPACE) :
         run_pbf()
         gui.circles(pos.to_numpy()/boundary,color=0x3098d9, radius=particle_radius*world_to_screen_ratio)
         gui.show()
 
-main()
+Main()
