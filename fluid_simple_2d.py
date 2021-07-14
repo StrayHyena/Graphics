@@ -106,12 +106,6 @@ def PredictPosition():
         pos[i] = ConfinePositionToBoundary(pos_i,timeCnt[None])
 
 @ti.kernel
-def ConfinePositionsToBoundary():
-    for i in pos:
-        p = pos[i]
-        pos[i] = ConfinePositionToBoundary(p,timeCnt[None])
-
-@ti.kernel
 def UpdateGrid():
     for I in ti.grouped(grid_particle_num):
         grid_particle_num[I] = 0
@@ -185,6 +179,7 @@ def ApplyDeltaPosition():
 @ti.kernel
 def UpdateVelocities():
     for i in velocities:
+        pos[i] = ConfinePositionToBoundary(pos[i],timeCnt[None])
         velocities[i] = (pos[i]-last_pos[i])/delta_t
         last_pos[i]   = pos[i]
     timeCnt[None] += delta_t
@@ -201,7 +196,6 @@ def run_pbf():
         ComputeLambdas()
         ComputeDeltaPosition()
         ApplyDeltaPosition()
-    ConfinePositionsToBoundary()
     UpdateVelocities()
     # debug_info()
 
