@@ -188,7 +188,7 @@ def LogInfo():
     rho_num = rhos.to_numpy()
     print(np.mean(rho_num),np.max(rho_num))
 
-def run_pbf():
+def Simulate():
     PredictPosition()
     UpdateGrid()
     FindNeighbors()
@@ -203,7 +203,7 @@ def Main():
     Initialize()
     gui = ti.GUI('Position Based Fluid',res = resolution,background_color= 0xffffff)
     while not gui.get_event(gui.SPACE) :
-        run_pbf()
+        Simulate()
         gui.circles(pos.to_numpy()/boundary,color=0x3098d9, radius=particle_radius*world_to_screen_ratio)
         gui.show()
 
