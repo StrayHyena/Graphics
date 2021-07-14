@@ -128,13 +128,14 @@ def find_neighbors():
         neighbor_cnt = 0
         for offseti in range(9):
             neighborCell = cell_i + grid_index_offset[offseti]
-            if neighborCell[0]>=0 and neighborCell[0]<grid_total_size[0] and neighborCell[1]>=0 and neighborCell[1]<grid_total_size[1]:
-                for j_index in range(grid_particle_num[neighborCell]):
-                    j = grid_to_particle[neighborCell,j_index]
-                    pos_j = pos[j]
-                    if (pos_i-pos_j).norm() < neighbor_radius and i!=j and neighbor_cnt<max_neighbor_num:
-                        neighbors[i,neighbor_cnt]=j
-                        neighbor_cnt+=1              
+            if neighborCell[0]<0 or neighborCell[0]>=grid_total_size[0] or neighborCell[1]<0 or neighborCell[1]>=grid_total_size[1]:
+                continue
+            for j_index in range(grid_particle_num[neighborCell]):
+                j = grid_to_particle[neighborCell,j_index]
+                pos_j = pos[j]
+                if (pos_i-pos_j).norm() < neighbor_radius and i!=j and neighbor_cnt<max_neighbor_num:
+                    neighbors[i,neighbor_cnt]=j
+                    neighbor_cnt+=1              
         neighbor_num[i] = neighbor_cnt                  
 
 @ti.kernel
