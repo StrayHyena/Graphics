@@ -301,7 +301,7 @@ def Simulate():
 def Main():
     Initialize()
     gui = ti.GUI('Position Based Fluid - Melting',res = resolution,background_color= 0xffffff)
-    while not gui.get_event(gui.SPACE) :
+    while not gui.get_event(gui.ESCAPE) :
         if gui.frame<=(1500*2/5) and gui.frame%2==0:
             PopFluid()
         Simulate()

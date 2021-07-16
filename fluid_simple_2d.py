@@ -46,7 +46,7 @@ rhos       = ti.field(dtype  = ti.f32,shape = particle_num)
 
 @ti.func
 def ConfinePositionToBoundary(p,tc):   
-    right = 65.0 + 10.0*ti.sin(0.25*math.pi*tc) #tc : time count
+    right = 70.0 + 10.0*ti.sin(0.25*math.pi*tc) #tc : time count
     left = 0 + particle_radius
     bot  = 0 + particle_radius
     top  = boundary[1] - particle_radius
@@ -202,7 +202,7 @@ def Simulate():
 def Main():
     Initialize()
     gui = ti.GUI('Position Based Fluid',res = resolution,background_color= 0xffffff)
-    while not gui.get_event(gui.SPACE) :
+    while not gui.get_event(gui.ESCAPE) :
         Simulate()
         gui.circles(pos.to_numpy()/boundary,color=0x3098d9, radius=particle_radius*world_to_screen_ratio)
         gui.show()
