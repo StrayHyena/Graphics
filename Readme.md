@@ -1,2 +1,2 @@
-Taichi version -- 0.7.8   
-python version -- 3.7.7
+Taichi  -- 0.7.8   
+Python  -- 3.7.7
