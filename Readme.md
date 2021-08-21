@@ -1,2 +1,2 @@
-Taichi  -- 0.7.8   
-Python  -- 3.7.7
+Python -- 3.8.10
+Taichi -- 0.7.29  

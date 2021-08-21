@@ -1,8 +1,6 @@
 import taichi as ti
 import random,math
 
-from taichi.lang.impl import call_internal
-
 ti.init(arch=ti.cpu)
 
 poly6_factor      = 315.0/(64.0*math.pi)
