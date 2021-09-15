@@ -1,4 +1,3 @@
-from numpy.core.fromnumeric import partition
 import taichi as ti
 import numpy as np
 import random,collections
