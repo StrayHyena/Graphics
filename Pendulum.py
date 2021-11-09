@@ -64,8 +64,8 @@ def Main():
         window.GUI.end()
         
         canvas.set_background_color((218/255,221/255,216/255))
-        canvas.circles(p,radius = 0.01,color=(31/255,110/255,212/255))
         canvas.lines(p,indices = indices,width = 0.005, color=(57/255,186/255,232/255))
+        canvas.circles(p,radius = 0.01,color=(31/255,110/255,212/255))
         window.show()
 
 Main()
