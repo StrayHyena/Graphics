@@ -1,5 +1,4 @@
 import taichi as ti
-import math
 
 ti.init(arch = ti.cpu)
 
@@ -9,14 +8,17 @@ p = ti.Vector.field(2,dtype = ti.f32,shape = 3) # position
 l = ti.field(dtype = ti.f32,shape = 2)          # length
 m = ti.field(dtype = ti.f32,shape = 2)          # mass
 ys= ti.field(dtype = ti.f32,shape = 4)          # [theta1,theta2,omega1,omega2]
+indices = ti.field(dtype = ti.i32,shape = 4)
 
 @ti.kernel
 def Initialize():
     for i in range(2):
         m[i] = 1
         l[i] = 0.2
+        indices[2*i] = i
+        indices[2*i+1] = i+1
     p[0] = ti.Vector([0.5,0.5]) # base position
-    ys[0] = math.pi*1.5/2
+    ys[0] = 3.1416*1.5/2
     ys[1] = 0
     ys[2] = ys[3] = 0
 
@@ -34,6 +36,7 @@ def f(y):
     acc = A@b
     return ti.Vector([ y[2] , y[3] , acc[0], acc[1] ]) #[ d(theta1)/dt, d(theta2)/dt, d(omega1)/dt, d(omega2)/dt]  
 
+# 4th order Runge-Kutta to solve ODEs
 @ti.kernel
 def RK4():
     k1 = f(ti.Vector([ys[0],ys[1],ys[2],ys[3]]))
@@ -46,12 +49,6 @@ def RK4():
     for i in range(1,3):
         p[i] = p[i-1] + ti.Vector([l[i-1]*ti.sin(ys[i-1]),-l[i-1]*ti.cos(ys[i-1])])
 
-def ComputeEnergy():
-    T = 0.5*(m[0]+m[1])*(l[0]**2)*(ys[2]**2)+0.5*m[1]*(l[1]**2)*(ys[3]**2)+m[1]*l[0]*l[1]*ti.cos(ys[0]-ys[1])*ys[2]*ys[3]
-    V = -(m[0]+m[1])*l[0]*g*ti.cos(ys[0])-m[1]*l[1]*g*ti.cos(ys[1])
-    E = T + V
-    return T,V,E
-
 def Main():
     Initialize()
     window = ti.ui.Window("Pendulum",(1000,1000))
@@ -59,15 +56,17 @@ def Main():
     while not window.is_pressed(ti.ui.ESCAPE):
         RK4()
 
-        T,V,E = ComputeEnergy()
+        T = 0.5*(m[0]+m[1])*(l[0]**2)*(ys[2]**2)+0.5*m[1]*(l[1]**2)*(ys[3]**2)+m[1]*l[0]*l[1]*ti.cos(ys[0]-ys[1])*ys[2]*ys[3]
+        V = -(m[0]+m[1])*l[0]*g*ti.cos(ys[0])-m[1]*l[1]*g*ti.cos(ys[1])
         window.GUI.begin("state info", 0, 0, 0.2, 0.1)
         window.GUI.text("kinetic      "+"{:.4f}".format(T))
         window.GUI.text("potential    "+"{:.4f}".format(V))
-        window.GUI.text("total energy "+"{:.6f}".format(E))
+        window.GUI.text("total energy "+"{:.6f}".format(T+V))
         window.GUI.end()
         
-        canvas.set_background_color((0.9,0.9,0.9))
-        canvas.circles(p,radius = 0.01,color=(0.0,0.0,0.0))
+        canvas.set_background_color((218/255,221/255,216/255))
+        canvas.circles(p,radius = 0.01,color=(31/255,110/255,212/255))
+        canvas.lines(p,indices = indices,width = 0.005, color=(57/255,186/255,232/255))
         window.show()
 
 Main()
