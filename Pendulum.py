@@ -3,14 +3,13 @@ import taichi as ti
 ti.init(arch = ti.cpu)
 
 dt = 0.001                                      # time step
-g = 9.81                                        # gravity
+g = 9.81                                        # gravity constant
 p = ti.Vector.field(2,dtype = ti.f32,shape = 3) # position
 l = ti.field(dtype = ti.f32,shape = 2)          # length
 m = ti.field(dtype = ti.f32,shape = 2)          # mass
-ys= ti.field(dtype = ti.f32,shape = 4)          # [theta1,theta2,omega1,omega2]
-indices = ti.field(dtype = ti.i32,shape = 4)
+ys= ti.field(dtype = ti.f32,shape = 4)          # [ theta1, theta2, omega1, omega2 ]
+indices = ti.field(dtype = ti.i32,shape = 4)    # line indices for drawing lines
 
-@ti.kernel
 def Initialize():
     for i in range(2):
         m[i] = 1
@@ -32,8 +31,8 @@ def f(y):
     a01 = m[1]*l[1]*ti.cos(y[0]-y[1])
     a10 = l[0]*ti.cos(y[0]-y[1])
     a11 = l[1]
-    A = 1.0/(a00*a11-a01*a10)*ti.Matrix([[a11,-a01],[-a10,a00]])
-    acc = A@b
+    A_inv = ti.Matrix([[a11,-a01],[-a10,a00]])/(a00*a11-a01*a10)
+    acc = A_inv@b
     return ti.Vector([ y[2] , y[3] , acc[0], acc[1] ]) #[ d(theta1)/dt, d(theta2)/dt, d(omega1)/dt, d(omega2)/dt]  
 
 # 4th order Runge-Kutta to solve ODEs
