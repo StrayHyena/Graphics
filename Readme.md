@@ -8,7 +8,7 @@ Pendulum
 <img src="./results/Pendulum.gif" alt="show" />    
   
 Position Based Fluid with thermal conduction  
-<img src="./results/FLuid_melting.gif" alt="show" />  
+<img src="./results/Fluid_melting.gif" alt="show" />  
   
 Material point method sand  
 <img src="./results/mpm_sand0.gif" alt="show" />  
