@@ -1,8 +1,11 @@
 Python -- 3.8.10  
 Taichi -- 0.8.9  
 
-Linera Elastic FEM  
+Linear Elastic FEM  
 <img src="./results/Linera_Elastic_FEM.gif" alt="show" />  
+
+Implicit Mass Spring
+<img src="./results/Implicit Mass Spring.gif" alt="show" />  
   
 Pendulum  
 <img src="./results/Pendulum.gif" alt="show" />    
@@ -10,7 +13,7 @@ Pendulum
 Position Based Fluid with thermal conduction  
 <img src="./results/Fluid_melting.gif" alt="show" />  
   
-Material point method sand  
+Material point method sand (不确定这个仿真结果是否正确)  
 <img src="./results/mpm_sand0.gif" alt="show" />  
 <img src="./results/mpm_sand1.gif" alt="show" />  
   
