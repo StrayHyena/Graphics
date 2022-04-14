@@ -59,10 +59,10 @@ def FillMK(MB:ti.types.sparse_matrix_builder(),KB:ti.types.sparse_matrix_builder
         f[i0]-=f0
         f[i1]+=f0
         d2E[i] = k[i]*(I-l[i]/dist01* ( I - (x[i0]-x[i1])@(x[i0]-x[i1]).transpose()/dist01**2 ) )
-        if fixPD:
+        if fixPD: #保证 nabla^2 G 是 正定的
             U,Sigma,V = ti.svd(d2E[i])
-            Sigma[0,0] = ti.max(0.0,Sigma[0,0])
-            Sigma[1,1] = ti.max(0.0,Sigma[1,1])
+            Sigma[0,0] = ti.max(0.0001,Sigma[0,0])
+            Sigma[1,1] = ti.max(0.0001,Sigma[1,1])
             d2E[i] = U@Sigma@V.transpose()
         for ki,kj in ti.static(ti.ndrange(2,2)):
             KB[2*i0+ki,2*i0+kj] += d2E[i][ki,kj]
@@ -178,7 +178,7 @@ def SubStep_Exact(newtonMethod):
             Numpy1DToField2D(dx,Npdx)
         else:
             GradientDesent()
-        if FieldNorm(dg) < 0.001: break
+        if FieldNorm(dg) < 1e-4: break
         t = LineSearch(0.03,0.5,1)
         FieldAdd(xn,xn,dx,1.0,t)
     UpdateXV()
