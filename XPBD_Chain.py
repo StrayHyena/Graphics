@@ -12,8 +12,10 @@ xn    = ti.Vector.field(2,ti.f32,n)
 v     = ti.Vector.field(2,ti.f32,n)
 mi    = ti.field(ti.f32,n)   # mass inverse
 lam   = ti.field(ti.f32,m)   # lambda       : Lagrange mutliplier
+k     = ti.field(ti.f32,m)   # stiffness       : Lagrange mutliplier
+d     = ti.field(ti.f32,m)   # damping ratio       : Lagrange mutliplier
 at    = ti.field(ti.f32,m)   # alpha tilde  : 1/(dt*dt* stiffness)
-b     = ti.field(ti.f32,m)   # beta         : constraint damping
+bt    = ti.field(ti.f32,m)   # beta  tilde       : constraint damping
 
 @ti.kernel
 def Initialize():
@@ -24,8 +26,10 @@ def Initialize():
     mi[0] = 0.0
     for i in lam:
         lam[i] = 0.0
-        at[i]  = 1/(dt*dt*1e2)
-        b[i]   = 0.001
+        k[i] = 1e3
+        d[i] = 0.001
+        at[i]  = 1/(dt*dt*k[i])
+        bt[i]  = k[i]*d[i]*dt*dt
 
 @ti.kernel
 def Predict():
@@ -41,7 +45,7 @@ def SolveConstraint():
         dC_dxj  = -dC_dxj1
     
         # dLam = -(C + at[j]*lam[j])/( at[j] + (dC_dxj.norm_sqr() * mi[j] + dC_dxj1.norm_sqr() * mi[j+1]) )
-        dLam = -(C + at[j]*lam[j] +(dC_dxj.dot(xn[j]-x[j])+dC_dxj1.dot(xn[j+1]-x[j+1])) * at[j]*b[j]/dt )/( at[j] + (dC_dxj.norm_sqr() * mi[j] + dC_dxj1.norm_sqr() * mi[j+1])* (1+at[j]*b[j]/dt) )
+        dLam = -(C + at[j]*lam[j] +(dC_dxj.dot(xn[j]-x[j])+dC_dxj1.dot(xn[j+1]-x[j+1])) * at[j]*bt[j]/dt )/( at[j] + (dC_dxj.norm_sqr() * mi[j] + dC_dxj1.norm_sqr() * mi[j+1])* (1+at[j]*bt[j]/dt) )
         dx[j]   += dC_dxj *  dLam * mi[j]
         dx[j+1] += dC_dxj1 * dLam * mi[j+1]
         lam[j]  += dLam
