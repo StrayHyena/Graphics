@@ -23,7 +23,7 @@ def ExtractRotation(A,R,maxIter):
         a1 = ti.Vector([A[0,1],A[1,1]])
         r0 = ti.Vector([R[0,0],R[1,0]])
         r1 = ti.Vector([R[0,1],R[1,1]])
-        w = -(a0.cross(r0) + a1.cross(r1))/((a0.dot(r0) + a1.dot(r1))+1e-9)
+        w = -(a0.cross(r0) + a1.cross(r1))/(ti.abs(a0.dot(r0) + a1.dot(r1))+1e-9)
         R = ti.Matrix([[ti.cos(w),-ti.sin(w)],[ti.sin(w),ti.cos(w)]]) @ R
     return R
 
