@@ -9,6 +9,23 @@ x   = ti.Vector.field(2,ti.f32,n)
 xr  = ti.Vector.field(2,ti.f32,n)  # x rest 
 xn  = ti.Vector.field(2,ti.f32,n)  # x next
 v   = ti.Vector.field(2,ti.f32,n)
+R   = ti.Matrix.field(2,2,ti.f32,())
+# a rotation with radian w, Rotation(w)
+# the deformation matrix is A,the raotion part of it is R_
+# use Newton method to solve non-linear equation 
+# w = w + dw, Rotation(w) will colser to R_
+# where dw = -(A[0,1]*ti.cos(w)-A[1,0]*ti.cos(w)+A[0,0]*ti.sin(w)+A[1,1]*ti.sin(w))/(-A[0,1]*ti.sin(w)+A[1,0]*ti.sin(w)+A[0,0]*ti.cos(w)+A[1,1]*ti.cos(w))
+
+@ti.func
+def ExtractRotation(A,R,maxIter):
+    for _ in range(maxIter):
+        a0 = ti.Vector([A[0,0],A[1,0]])
+        a1 = ti.Vector([A[0,1],A[1,1]])
+        r0 = ti.Vector([R[0,0],R[1,0]])
+        r1 = ti.Vector([R[0,1],R[1,1]])
+        w = -(a0.cross(r0) + a1.cross(r1))/((a0.dot(r0) + a1.dot(r1))+1e-9)
+        R = ti.Matrix([[ti.cos(w),-ti.sin(w)],[ti.sin(w),ti.cos(w)]]) @ R
+    return R
 
 @ti.kernel
 def Initialize():
@@ -17,6 +34,7 @@ def Initialize():
         xr[i] = [ti.random()*a+0.35,ti.random()*a+0.35]
         x[i]  = xr[i]
         xn[i] = xr[i]
+    R[None] = ti.Matrix.identity(ti.f32,2)
 
 @ti.kernel
 def Substep():
@@ -32,9 +50,9 @@ def Substep():
     A_pq = ti.Matrix.zero(ti.f32,2,2)
     for i in x:
         A_pq += (xn[i]-xnc)@(xr[i]-xrc).transpose()
-    R,_ = ti.polar_decompose(A_pq)
+    R[None] = ExtractRotation(A_pq,R[None],10)
     for i in x:
-        xn[i] = ti.math.clamp(R@(xr[i]-xrc)+xnc,r,1.0-r)
+        xn[i] = ti.math.clamp(R[None]@(xr[i]-xrc)+xnc,r,1.0-r)
         v[i] = (xn[i]-x[i])/dt
         x[i] = xn[i]
 
