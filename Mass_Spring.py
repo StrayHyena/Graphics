@@ -46,7 +46,7 @@ def Initialize():
         k[i] = 1000
 
 @ti.kernel
-def FillMK(MB:ti.types.sparse_matrix_builder(),KB:ti.types.sparse_matrix_builder(),fixPD:ti.i32):
+def FillMK(MB:ti.types.sparse_matrix_builder(),KB:ti.types.sparse_matrix_builder(),isProject2SPD:ti.i32):
     for i in f: 
         f[i] = ti.Vector([0.0,-2.0])*m[i]
         MB[2*i+0,2*i+0] += m[i]
@@ -59,7 +59,7 @@ def FillMK(MB:ti.types.sparse_matrix_builder(),KB:ti.types.sparse_matrix_builder
         f[i0]-=f0
         f[i1]+=f0
         d2E[i] = k[i]*(I-l[i]/dist01* ( I - (x[i0]-x[i1])@(x[i0]-x[i1]).transpose()/dist01**2 ) )
-        if fixPD: #保证 nabla^2 G 是 正定的
+        if isProject2SPD: #保证 nabla^2 G 是 正定的
             U,Sigma,V = ti.svd(d2E[i])
             Sigma[0,0] = ti.max(0.0001,Sigma[0,0])
             Sigma[1,1] = ti.max(0.0001,Sigma[1,1])
@@ -71,7 +71,7 @@ def FillMK(MB:ti.types.sparse_matrix_builder(),KB:ti.types.sparse_matrix_builder
             KB[2*i1+ki,2*i0+kj] -= d2E[i][ki,kj]
         
 @ti.kernel
-def Numpy1DToField2D(arg0:ti.template(),anp:ti.ext_arr()):
+def Numpy1DToField2D(arg0:ti.template(),anp:ti.types.ndarray()):
     for i in arg0: arg0[i] = ti.Vector([anp[2*i],anp[2*i+1]])
 
 # One iteration of Newton’s method(Baraff and Witkin, 1998)----------------------------------------------
@@ -205,6 +205,7 @@ def Main():
         window.GUI.text('Current : '+ methods[methodIdx])
         canvas.set_background_color((245/255,245/255,245/255))
         canvas.lines(x,indices = e,width = 0.025/n, color=(57/255,186/255,232/255))
+        window.GUI.end()
         window.show()
 
 Main()
