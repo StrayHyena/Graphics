@@ -1,5 +1,5 @@
 Python -- 3.8.10  
-Taichi -- 0.8.9  
+Taichi -- 1.0.3  
 
 Linear Elastic FEM  
 <img src="./results/Linera_Elastic_FEM.gif" alt="show" />  
