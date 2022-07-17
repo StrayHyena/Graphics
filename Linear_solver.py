@@ -52,34 +52,45 @@ class LinearSolver:
 
     def SetAb(self,newA,newb):
         if newb.shape!=(self.n,) or newA.shape!=(self.n,self.n):
-            print("ERROR: shape not match")
-        self.A,self.b = newA,newb
+            print("shape mismatch.\ncurrent solver'n is %d.\nplease instantiate a new LinearSolver"%self.n)
+        self.A.from_numpy(newA)
+        self.b.from_numpy(newb)
 
     @ti.kernel
     def Residual(self):
-        for i in range(self.n):
-            self.r[i] = self.b[i]
-            for j in range(self.n):
-                self.r[i]-=self.A[i,j]*self.x[j]
+        for i in self.r:   self.r[i] = self.b[i]
+        for i,j in self.A: self.r[i] -= self.A[i,j]*self.x[j]
 
-    def __init__(self,n,A=None,b=None,iterationNum=100,epsilon=1e-6):
-        self.n = n
+    @ti.kernel
+    def GetMaxResidual(self)->ti.f64:
+        ret = ti.f64(0.0)
+        for i in self.r: ti.atomic_max(ret,ti.abs(self.r[i]))
+        return ret
+
+    def __init__(self,n=None,A=None,b=None,iterationNum=100,epsilon=1e-7,rho = 1.0-1e-4):
+        if n is None : self.n = b.shape[0]
+        else:          self.n = n
         self.eps = epsilon
         self.itrNum = iterationNum
         
-        self.A  = A 
-        self.b  = b 
+        self.A  = ti.field(dtype = ti.f64,shape = (self.n,self.n))
+        self.b  = ti.field(dtype = ti.f64,shape = self.n)
+        if A is not None and b is not None: self.SetAb(A,b)
         
-        self.x    = ti.field(dtype = ti.f64,shape = n)
-        self.r  = ti.field(dtype = ti.f64,shape = n)
-        self.t  = ti.field(dtype = ti.f64,shape = n)
-        self.p  = ti.field(dtype = ti.f64,shape = n) #temporary vector for intermedate variables
+        self.x  = ti.field(dtype = ti.f64,shape = self.n)
+        self.r  = ti.field(dtype = ti.f64,shape = self.n)
+        self.t  = ti.field(dtype = ti.f64,shape = self.n)
+        self.p  = ti.field(dtype = ti.f64,shape = self.n) #temporary vector for intermedate variables
 
-        self.L = ti.field(dtype = ti.f64,shape = (n,n))
-        self.U = ti.field(dtype = ti.f64,shape = (n,n))
-        self.P = ti.field(dtype = ti.f64,shape = (n,n))
+        # LU direct solver
+        self.L = ti.field(dtype = ti.f64,shape = (self.n,self.n))
+        self.U = ti.field(dtype = ti.f64,shape = (self.n,self.n))
+        self.P = ti.field(dtype = ti.f64,shape = (self.n,self.n))
 
-        self.x.fill(0) #initial guess
+        # chebyshev acceleration
+        self.y   = ti.field(dtype = ti.f64,shape = self.n)  # new y          
+        self.y1   = ti.field(dtype = ti.f64,shape = self.n) # previous y          
+        self.y2  = ti.field(dtype = ti.f64,shape = self.n)  # previous previous y 
 
     @ti.kernel
     def StepJacobi(self):
@@ -129,10 +140,36 @@ class LinearSolver:
         for i in range(self.n):
             self.p[i] = self.r[i] + beta *self.p[i]
 
-    def Jacobi(self):
-        _ = 0
+    @ti.kernel
+    def StepChebyshev(self,w:ti.f64):
+        for i in self.y: self.y[i] = w * (self.x[i] - self.y2[i]) + self.y2[i]
+
+    def Chebyshev(self,Method = 'Jacobi', rho=0.8+1e-4):
+        stepMethod = getattr(self,'Step'+Method)
+        self.x.fill(0)
+        stepMethod() 
+        self.y2.copy_from(self.x)
+        stepMethod() 
+        self.y1.copy_from(self.x)
+        w  = 2/(2-rho*rho)
+        _  = 2
         self.Residual()
         while _<self.itrNum and np.max(np.abs(self.r.to_numpy()))>self.eps:
+            self.x.copy_from(self.y1)
+            stepMethod() 
+            self.StepChebyshev(w)
+            self.y2.copy_from(self.y1)
+            self.y1.copy_from(self.y)
+            w = 4/(4-rho*rho*w)
+            self.Residual()
+            _+=1
+        return _
+
+    def Jacobi(self):
+        _ = 0
+        self.x.fill(0)
+        self.Residual()
+        while _<self.itrNum and self.GetMaxResidual()>self.eps:
             self.StepJacobi()
             self.Residual()
             _+=1
@@ -141,8 +178,9 @@ class LinearSolver:
     def GaussSeidel(self):
         _ = 0
         reorder = self.GraphColoring()
+        self.x.fill(0) 
         self.Residual()
-        while _<self.itrNum and np.max(np.abs(self.r.to_numpy()))>self.eps:
+        while _<self.itrNum and self.GetMaxResidual()>self.eps:
             for partition in reorder:
                 self.StepGaussSeidel(partition,partition.size)
             self.Residual()
@@ -151,9 +189,10 @@ class LinearSolver:
 
     def ConjugateGradient(self):
         _ = 0
+        self.x.fill(0) 
         self.Residual()
         self.p.copy_from(self.r)
-        while _<self.itrNum and np.max(np.abs(self.r.to_numpy()))>self.eps:
+        while _<self.itrNum and self.GetMaxResidual()>self.eps:
             self.StepConjugateGradient()
             _+=1
         return _
@@ -191,71 +230,65 @@ class LinearSolver:
                 self.x[j] -= self.U[j,i]*self.x[i]
             self.x[j] /= self.U[j,j]
 
-def LinearSolverTestMain():
-    ti.init(ti.cpu)
-    n  = 7
-    b  = ti.field(dtype = ti.f64,shape=n)
-    A  = ti.field(dtype = ti.f64,shape=(n,n))
 
+def GenerateTestAb_Iterative(n):
+    A = np.zeros((n,n))
+    b = np.zeros((n,))
     for i in range(n):
         A[i,i] = 2.5
         if i+1<=n-1: A[i,i+1] = -1
         if i-1>=0:   A[i,i-1] = -1
-    A[0,n-1]=-1
-    A[n-1,0]=-1
+    A[0,n-1]=1
+    A[n-1,0]=1
     for i in range(n):
         b[i] = 0.0
     b[0] = 1
+    from numpy import linalg as LA
+    D = np.diag(np.diag(A))
+    L = np.tril(A)
+    w, v = LA.eig(-LA.inv(D)@(A-D))
+    w, v = LA.eig(-LA.inv(L)@(A-L))
+    # print(w)
+    return A,b
 
-    ls = LinearSolver(n,A,b)
+def GenerateTestAb_Direct(n):
+    from numpy import random
+    npA = np.zeros((n,n))
+    npb = np.zeros((n,))
+    for j in range(n):
+        for i in range(n):
+            npA[j,i] = random.rand()*9
+    for i in range(n): npb[i] = random.rand()*9
+    return npA,npb
+
+
+def LinearSolverTestMain():
+    ti.init(ti.cpu)
+    n  = 7
+    npA,npb = GenerateTestAb_Iterative(n)
+    npx = np.linalg.solve(npA,npb)
+    ls = LinearSolver(A = npA,b = npb)
+    # ls.Jacobi() # warm up
 
     import time
+    print('{0:20}   {1:10}  {2:10}  {3:12} {4:10}'.format('Method','Time(s)','Itr-Cnt','Max-Residual','lsx-npx'))
 
-    print('{0:10}   {1:10}  {2:10}  {3:10}'.format('Method','Time(s)','Itr Cnt','Max Residual'))
+    for method in [ls.Jacobi,ls.GaussSeidel,ls.ConjugateGradient,ls.Chebyshev]:
+        start = time.process_time()
+        cnt = method()
+        end = time.process_time()
+        print('{0:20} {1:10}{2:10} {3:15.3e} {4:10.3e} '.format(method.__name__,end-start,cnt,np.max(np.abs(ls.r.to_numpy())),np.max(np.abs(npx-ls.x.to_numpy())) ))
 
-    ls.x.fill(0)
-    start = time.process_time()
-    cnt = ls.Jacobi()
-    end = time.process_time()
-    print('{0:10}{1:10}{2:10} {3:10}'.format('Jacobi',end-start,cnt,np.max(np.abs(ls.r.to_numpy()))))
-    
-    ls.x.fill(0)
-    start = time.process_time()
-    cnt = ls.GaussSeidel()
-    end = time.process_time()
-    print('{0:10}{1:10}{2:10} {3:10}'.format('GS',end-start,cnt,np.max(np.abs(ls.r.to_numpy()))))
-
-    ls.x.fill(0)
-    start = time.process_time()
-    cnt = ls.ConjugateGradient()
-    end = time.process_time()
-    print('{0:10}{1:10}{2:10} {3:10}'.format('CG',end-start,cnt,np.max(np.abs(ls.r.to_numpy()))))
-
-    from numpy import random
-    n  = 50
-    b  = ti.field(dtype = ti.f64,shape=n)
-    A  = ti.field(dtype = ti.f64,shape=(n,n))
-
-    maxerr = 0
-    for _ in range(10):
-        print(_)
-        npA = np.zeros((n,n))
-        npb = np.zeros((n,))
-        # npA = np.array([ [0.0,2,1],[5,8,1],[4,4,1] ] )
-        # npb = np.array([13,-9,6])
-        # print(npA.shape)
-        # print(npb.shape)
-        for j in range(n):
-            for i in range(n):
-                npA[j,i] = random.rand()*10
-        for i in range(n): npb[i] = random.rand()*10
-
-        A.from_numpy(npA)
-        b.from_numpy(npb)
-        ls = LinearSolver(n,A,b)
-        ls.DirectLU()
-        err = np.max(np.abs(np.linalg.solve(npA,npb) - ls.x.to_numpy()))
-        maxerr = max(err,maxerr)
-    print(maxerr)
+    # maxerr = 0
+    # n = 50
+    # ls = LinearSolver(n)
+    # for _ in range(1):
+    #     print(_)
+    #     npA,npb = GenerateTestAb_Direct(n)
+    #     ls.SetAb(npA,npb)
+    #     ls.DirectLU()
+    #     err = np.max(np.abs(np.linalg.solve(npA,npb) - ls.x.to_numpy()))
+    #     maxerr = max(err,maxerr)
+    # print(maxerr)
 
 LinearSolverTestMain()
