@@ -37,6 +37,7 @@ Taichi -- 1.0.4
   
 <font color=#288FD4  size=5 >Material point method snow</font>  
 - Stomakhin, A., Schroeder, C., Chai, L., Teran, J., & Selle, A. (2013). A material point method for snow simulation.  
+- Jiang, Chenfanfu, et al. "The affine particle-in-cell method." ACM Transactions on Graphics (TOG) 34.4 (2015): 1-10.
 <img src="./results/mpm_snow.gif" alt="show" />  
   
 <font color=#288FD4  size=5 >XPBD Chain</font>  
