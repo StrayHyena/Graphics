@@ -51,3 +51,9 @@ Taichi -- 1.0.4
   
 <font color=#288FD4  size=5 >Ray Tracer</font>  
 <img src="./results/RayTracer.gif" alt="show" />  
+
+<font color=#288FD4  size=5 >Bezier and BSpline Curve</font>  
+<img src="./results/control_point_curve.gif" alt="show" />  
+
+<font color=#288FD4  size=5 >Subdivision Curve</font>  
+<img src="./results/subdivision_curve.gif" alt="show" />  

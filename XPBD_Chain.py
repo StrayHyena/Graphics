@@ -2,7 +2,7 @@ import taichi as ti
 
 ti.init(arch = ti.cpu)
 
-n,l = 5,0.015
+n,l = 30,0.015
 # n,l = 3,0.2
 m = n-1
 dt = 0.001
@@ -26,7 +26,7 @@ def Initialize():
     mi[0] = 0.0
     for i in lam:
         lam[i] = 0.0
-        k[i] = 1e3
+        k[i] = 1e5
         d[i] = 0.001
         at[i]  = 1/(dt*dt*k[i])
         bt[i]  = k[i]*d[i]*dt*dt

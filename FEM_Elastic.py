@@ -2,7 +2,7 @@ import taichi as ti
 
 ti.init(arch=ti.cpu)
 
-elementShape = (20,2)
+elementShape = (20,10)
 vertexShape  = (elementShape[0]+1,elementShape[1]+1)
 elementN     = elementShape[0]*elementShape[1]*2
 vertexN      = vertexShape[0]*vertexShape[1]
