@@ -2,7 +2,7 @@ import taichi as ti
 from taichi.math import vec2,vec3
 from time import sleep
 
-ti.init(arch = ti.cpu,dynamic_index=True)
+ti.init(arch = ti.cpu)
 
 bg_color = (0.8,0.8,0.8)
 max_ctrl_n,max_n = 100,1000

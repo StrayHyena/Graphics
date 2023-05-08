@@ -57,3 +57,6 @@ Taichi -- 1.0.4
 
 <font color=#288FD4  size=5 >Subdivision Curve</font>  
 <img src="./results/subdivision_curve.gif" alt="show" />  
+
+<font color=#288FD4  size=5 >Delaunay Triangluation</font>  
+<img src="./results/triangluation.gif" alt="show" />  
