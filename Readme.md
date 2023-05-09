@@ -49,6 +49,12 @@ Taichi -- 1.0.4
 - Müller, M., Heidelberger, B., Hennix, M., & Ratcliff, J. (2007). Position based dynamics.   
 <img src="./results/rope.gif" alt="show" />  
   
+<font color=#288FD4  size=5 >Continuous Collision</font>
+- Robust Treatment of Collisions, Contact and Friction for Cloth Animation  
+- Cubic equation solver (bisect)
+- Vertex-Face Edge-Edge Collision 
+<img src="./results/continuous_collision.gif" alt="show" />  
+
 <font color=#288FD4  size=5 >Ray Tracer</font>  
 <img src="./results/RayTracer.gif" alt="show" />  
 
