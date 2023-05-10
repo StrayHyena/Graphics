@@ -13,9 +13,8 @@ epsilon = 1e-10
 
 tri_n = 8
 fps = 30.0*5
-substeps = 1
 collision_pass = 10
-dt = 1.0/fps/substeps
+dt = 1.0/fps
 h = 1e-2
 
 pts  = ti.Vector.field(3, ti.f64, 3*tri_n)  # point position 
@@ -136,44 +135,6 @@ def MomentumAndKinetic():
     return m,k
 
 @ti.kernel
-def InitializeTest(case:int):
-    for i in range(tri_n):
-        color = vec3d(0.5+0.5*ti.random(),0.5+0.5*ti.random(),0.5+0.5*ti.random())
-        clr[3*i] = clr[3*i+1] = clr[3*i+2] = color
-    for i in idx:idx[i] = i
-    for i in ipl:ipl[i] = vec3d(0,0,0)
-    vf_n[0] = ee_n[0] = 0
-    if case==0:
-        a,b = 0.4,.5
-        v = [vec3d(0,a,0),vec3d(ti.sqrt(3)*a/2,-a/2,0),vec3d(-ti.sqrt(3)*a/2,-a/2,0)]
-        center = [vec3d(0.5,0.5,0.4),vec3d(0.5,0.5,0.5)]
-        for j in ti.static(range(3)):pts[j]   = center[0]+v[j]
-        for j in ti.static(range(3)):pts[3+j] = center[1]+v[j]*b
-        vel[0] = vel[1] = vel[2] = vec3d(0,0,0)
-        vel[3] = vel[4] = vel[5] = vec3d(0,0,-0.1)
-    if case==1:
-        pts[0] = vec3d(0.5,0.6,0.1)
-        pts[1] = vec3d(0.5,0.6,0.9)
-        pts[2] = vec3d(0.5,0.8,0.1)
-        pts[3] = vec3d(0.9,0.4,0.5)
-        pts[4] = vec3d(0.1,0.4,0.5)
-        pts[5] = vec3d(0.1,0.2,0.5)
-        vel[0] = vel[1] = vel[2] = vec3d(0,0,0)
-        vel[3] = vel[4] = vel[5] = vec3d(0,0.1,0)
-    if case==2:
-        pts[0] = vec3d(0.9,0.4,0.5)
-        pts[1] = vec3d(0.1,0.4,0.5)
-        pts[2] = vec3d(0.1,0.2,0.5)
-        vel[0] = vec3d(0,0.0,0)
-        vel[1] = vec3d(0,-0.1,0)
-        vel[2] = vec3d(0,0.1,0)
-    for i in range(tri_n):
-        tri_idx = [idx[3*i],idx[3*i+1],idx[3*i+2]]
-        for j in ti.static(range(3)):
-            edges[3*i+j] = [tri_idx[j],tri_idx[(j+1)%3]]
-    for i in edges: el[i] = (pts[edges[i][0]]-pts[edges[i][1]]).norm()
-
-@ti.kernel
 def Integration():
     for i in pts1:  pts1[i] = pts[i] + vel[i]*dt
     for i in ipl: ipl[i] = [0,0,0]
@@ -191,18 +152,6 @@ def Integration():
     for i in vel:
         vel[i]+=ipl[i]
         pts1[i] = pts[i]+vel[i]*dt
-
-@ti.func
-def IntersectTwoLine(a,b,c,d):
-    o1,o2,d1,d2,o12 = a,c,b-a,d-c,c-a
-    valid,t  = False,vec2d(0,0)
-    index_pair = [0,1,0,2,1,2]
-    for k in ti.static(range(3)):
-        i,j = index_pair[2*k],index_pair[2*k+1]
-        A = mat2d([ [d1[i],-d2[i]] , [d1[j],-d2[j] ]])
-        y = vec2d(o12[i],o12[j])
-        if ti.abs(A.determinant())>=epsilon: valid,t = True,A.inverse()@y
-    return valid,o1+t[0]*d1,vec4d(1-t[0],t[0],1-t[1],t[1])
 
 @ti.kernel
 def Collision():
@@ -317,8 +266,7 @@ def Main():
     canvas = window.get_canvas()
     scene = ti.ui.Scene()
     camera = ti.ui.Camera()
-    camera.position(0.5, 0.5, 2)
-    camera.position(2, 2, 2)
+    camera.position(0.5, 0.5, 2.5)
     camera.lookat(0.5, 0.5, 0.5)
 
     while window.running:
@@ -328,13 +276,11 @@ def Main():
         scene.ambient_light((0.8, 0.8, 0.8))
         scene.point_light(pos=(0.5, 1.5, 1.5), color=(1, 1, 1))
 
-        for _ in range(substeps):
-            Integration()
-            for __ in range(collision_pass): Collision()
-            UpdatePosition()
+        Integration()
+        for __ in range(collision_pass): Collision()
+        UpdatePosition()
 
         scene.mesh(pts,idx,per_vertex_color = clr)
-
         canvas.scene(scene)
         window.show()
 
