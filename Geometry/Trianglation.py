@@ -34,33 +34,8 @@ def Initialize():
     p[0] = pmin - d*vec2(1,3)
     p[1] = vec2(pmin[0],pmax[1]) + d*vec2(-1,1)
     p[2] = pmax + d*vec2(3,1)
-    # p[3]= [0.340826, 0.518068]
-    # p[4]= [0.074625, 0.340243]
-    # p[5]= [0.716705, 0.662276]
-    # p[6]= [0.161661, 0.784232]
-    # p[7]= [0.446710, 0.634982]
-    # p[8]= [0.899285, 0.944468]
-    # p[9]= [0.279030, 0.999414]
-    # p[10]=[0.167203, 0.125108]
     tri_n[None] = 1
     tri[0] = [0,1,2]  # super triangle :-D
-
-@ti.kernel
-def Initialize1():
-    for i in p: p[i] = [-1,-1]
-    pmin = vec2(1,1)*FLT_MAX
-    pmax = -pmin
-    for i in range(pt_n[None]):  
-        p[i] = [ti.random(),ti.random()]
-        ti.atomic_min(pmin, p[i])
-        ti.atomic_max(pmax, p[i])
-    d = 10*(pmax - pmin)
-    p[0] = pmin - d*vec2(1,3)
-    p[1] = vec2(pmin[0],pmax[1]) + d*vec2(-1,1)
-    p[2] = pmax + d*vec2(3,1)
-    tri_n[None] = 1
-    tri[0] = [0,1,2]  # super triangle :-D
-
 
 @ti.func
 def Circumcircle(a,b,c):
