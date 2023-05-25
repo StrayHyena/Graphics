@@ -1,5 +1,5 @@
 import taichi as ti
-import random
+import random,time
 
 FLT_MAX = 1e30
 INT_MAX = 0xffffffff
@@ -21,11 +21,10 @@ aabbs = aabb.field(shape=n)
 nodes = bvh_node.field(shape = 2*n)  #即使每个叶子节点放一个primitive，整个树的结点也不会超过2*n
 eidx = ti.field(ti.u32,n)  # element is edge index for BVH building
 
-ray = ti.Vector.field(2,ti.f32,3)
-raye= ti.field(ti.i32,2)
-
 e1      = ti.field(ti.i32,2*n)  # flattened e for canvas.lines()
-temp    = [ti.field(ti.i32,n*10+10) for _ in range(2)]  # [0] will be size of this array
+
+boxs_pts = [ ti.Vector.field(2, ti.f32,8) for _ in range(2*n) ]
+boxs_idx = ti.field(ti.i32,8)
 
 def AABBGrow(this,other):
     this.bmax = vec2(max(this.bmax[0],other.bmax[0]),max(this.bmax[1],other.bmax[1]))
@@ -67,6 +66,12 @@ def BVHBuildSAH(node_idx,start,end):
                 split_cost,split_axis,split_pos = cost,j,curr_split_pos[j]
                 left_count,right_count = lc,rc
 
+    boxs_pts[node_idx][0] = this_node.box.bmin
+    boxs_pts[node_idx][2] = vec2(this_node.box.bmin[0],this_node.box.bmax[1])
+    boxs_pts[node_idx][4] = this_node.box.bmax
+    boxs_pts[node_idx][6] = vec2(this_node.box.bmax[0],this_node.box.bmin[1])
+    for j in range(1,8,2):boxs_pts[node_idx][j] = boxs_pts[node_idx][(j+1)%8]
+    
     count = end-start+1
     assert(left_count+right_count==count)
 
@@ -102,78 +107,22 @@ def Initialize():
         aabbs[i].bmax = vec2(max(p[i0][0],p[i1][0]),max(p[i0][1],p[i1][1]))
     for i in e1:   e1[i] = i
     for i in eidx: eidx[i] = i
-    ray[0],ray[1] = (0.5,0.9),(0.5,0.0)
-    raye[0],raye[1] = 0,1
     for i in nodes: nodes[i].start,nodes[i].end = ti.u32(INT_MAX),0
+    for i in boxs_idx: boxs_idx[i] = i
 
-@ti.func
-def HitAABB(o,d,box):
-    bmin,bmax = box.bmin,box.bmax
-    d = d.normalized()
-    tnmax ,tfmin, ret =  0.0,FLT_MAX, 1
-    for j in ti.static(range(2)):
-        if d[j]==0.0:
-            if bmin[j]>o[j] or o[j]>bmax[j]:ret = 0
-        else:
-            tNear,tFar = (bmin[j]-o[j])/d[j],(bmax[j]-o[j])/d[j]
-            if tNear>tFar: tNear,tFar = tFar,tNear
-            if tFar  < tfmin : tfmin = tFar
-            if tNear > tnmax : tnmax = tNear
-            if tnmax > tfmin : ret = 0
-    return ret
-
-@ti.func
-def HitEdge(o,d,p0,p1):
-    ret = vec2(-1,-1)  #  o + ret[0]* d = p0 + ret[1]* (p1-p0)
-    A = ti.Matrix.cols([d,p0-p1])
-    if ti.abs( A.determinant() )>EPS: ret = A.inverse()@(p0 - o)
-    if ret[1]<0.0 or ret[1]>1.0: ret[0] = -1
-    return ret[0]
-
-@ti.func
-def HitScene(o,d):
-    t,is_intersect = FLT_MAX,False
-    temp[0][0],temp[0][1] = 1,0  # count , bvh index
-    while temp[0][0]>0:
-        new_cnt = 0
-        for i in range(temp[0][0]):
-            node = nodes[temp[0][i+1]]
-            t_box = HitAABB(o,d,node.box)
-            if t_box<0.0:continue
-            if node.start > node.end:
-                temp[1][new_cnt+0] = node.li
-                temp[1][new_cnt+1] = node.ri
-                new_cnt+=2
-                continue
-            for j in range(node.start,node.end+1):
-                edge   = e[eidx[j]]
-                this_t = HitEdge(o,d, p[edge[0]],p[edge[1]] )
-                if this_t>0.0:
-                    is_intersect = True
-                    ti.atomic_min(t, this_t)
-        temp[0][0] = new_cnt
-        for i in range(new_cnt):
-            temp[0][i+1] = temp[1][i]
-    if not is_intersect: t = -1
-    return t
-
-@ti.kernel
-def HitScene_BroutForce():
-    o,d,t,is_intersect = ray[0],(ray[1]-ray[0]).normalized(),FLT_MAX,False
-    for i in e:
-        ret = HitEdge(o,d,p[e[i][0]],p[e[i][1]])
-        if ret >=0 :
-            is_intersect = True 
-            ti.atomic_min(t, ret)
-    if is_intersect:ray[2] = o+t*d
-    else: ray[2] = -vec2(FLT_MAX,FLT_MAX)
-
-@ti.kernel
-def HitScene_BVH():
-    o,d = ray[0],(ray[1]-ray[0]).normalized()
-    t = HitScene(o,d)
-    if t > 0.0: ray[2] = o+t*d
-    else: ray[2] = o
+def RenderBVH(canvas,depth):
+    s,_ = [(0,(52/255,152/255,219/255))],0
+    while len(s)>0 and _<=depth:
+        ns = []
+        for i,color in s:
+            if _==depth: canvas.lines(boxs_pts[i],0.001,boxs_idx,color)
+            if nodes[i].start<=nodes[i].end: continue
+            ns.append((nodes[i].li,(231/255,76/255,60/255)))
+            ns.append((nodes[i].ri,(52/255,152/255,219/255)))
+        s,_ = ns,_+1
+def GetDepthBVH(i):
+    if nodes[i].start<=nodes[i].end:return 1
+    else:return 1+max(GetDepthBVH(nodes[i].li),GetDepthBVH(nodes[i].ri))
 
 def Main():
     Initialize()
@@ -181,21 +130,14 @@ def Main():
     windows = ti.ui.Window("BVH2D", (1400,1400))
     canvas = windows.get_canvas()
 
+    _,d = 0,GetDepthBVH(0)
     while not windows.is_pressed(ti.ui.ESCAPE):
-        if windows.is_pressed(ti.ui.LMB):
-            ray[1] = windows.get_cursor_pos()
-            ray[1] = ray[0] + 10*(ray[1]-ray[0]).normalized()
-        if windows.is_pressed(ti.ui.RMB):
-            ray[0] = windows.get_cursor_pos()
-            ray[1] = ray[0] + 10*(ray[1]-ray[0]).normalized()
         canvas.set_background_color((0.1,0.1,0.1))
         canvas.lines( p,  0.001, e1,(236/255,240/255,241/255))
         canvas.circles(p, 0.002,(102/255,187/255,106/255))
-        
-        # HitScene_BroutForce()
-        HitScene_BVH()
-        canvas.lines( ray,  0.001, raye,(242/255,202/255,47/255))
-        canvas.circles(ray,0.004,(212/255,13/255,18/255))
+        RenderBVH(canvas,_)
+        _ = (_+1)%d
+        time.sleep(0.5)
         windows.show()
 
 Main()
