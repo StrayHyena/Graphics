@@ -56,7 +56,22 @@ Taichi -- 1.6.0
 <img src="./results/continuous_collision.gif" alt="show" />  
 
 <font color=#288FD4  size=5 >Ray Tracer</font>  
-<img src="./results/RayTracer.gif" alt="show" />  
+- SAH BVH
+- Brdfs:
+  -   Specular Model:  GGX Microfacet
+  -   Diffuse  Model:  Lambert
+  -   Mirror
+  -   Glass
+- Volume Path Tracer
+- Importance Sampline:
+  -   sampling cosine term
+  -   sampling brdf term
+
+<img src="./results/bunny_mf.png"   alt="show" />  
+<img src="./results/sphere_mf.png"  alt="show" />  
+<img src="./results/glass.png"      alt="show" />  
+<img src="./results/mirror.png"     alt="show" />  
+<img src="./results/volume.png"     alt="show" />  
 
 <font color=#288FD4  size=5 >2D surface area heuristic BVH</font>  
 <img src="./results/bvh2d.gif" alt="show" />  
