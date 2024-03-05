@@ -159,7 +159,7 @@ class NewtonMethod:
         # 注意，只有当x^(k+1)被计算出来的时候，s^k才被计算出来
         m = 5
         for k in range(1,maxIterNum):
-            if _==maxIterNum-1:return None
+            if k==maxIterNum-1:return None
             x = xs[-1]
 
             # 当 ss,ys不足m时，就用小m
@@ -302,7 +302,7 @@ def UnconstrainedTest(method_name):
     elif method_name=='GD':     pts = GradientMethod.GD(f,[10.,1.])
     elif method_name=='BB':     pts = GradientMethod.BB(f,[10.,1.])
     elif method_name=='Mom':    pts = StochasticMethod.Momentum(f,[10.,1.])
-    elif method_name=='AD':     pts = StochasticMethod.AdaGrad(f,[10.,1.])
+    # elif method_name=='AD':     pts = StochasticMethod.AdaGrad(f,[10.,1.])
     elif method_name=='ADAM':   pts = StochasticMethod.Adam(f,[10.,1.])
     Utils.Visualize(f,pts,method_name)
 
@@ -442,7 +442,7 @@ def ConstrainedTest(method_name):
     # 就不可视化了，毕竟迭代的点的目标函数已经有罚项了
     print(method_name,' iter num ',len(pts)-1,' Min point ',pts[-1])
 
-# UnconstrainedTest('ADAM')
+UnconstrainedTest('BB')
 # ConstrainedTest('AL')
 
 # 演示ADMM。 min f(x) = x[0]**2 + 10*x[1]**2 等价于

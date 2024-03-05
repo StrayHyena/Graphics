@@ -8,6 +8,29 @@ Taichi -- 1.6.0
 - Conjugate Gradient  
 <img src="./results/Linear_Solver.png" alt="show" /> 
 
+<font color=#288FD4  size=5 >Optimization (ref-book:最优化：建模、算法与理论) </font>
+## Unconstrained Optimization
+- Line search:
+  - Armijo
+  - Wolfe
+- Gradient Descent with line search
+<img src="./results/GradientDescent.gif" alt="show" /> 
+- Barzilar-Borwein with line search
+<img src="./results/BarzilarBorwein.gif" alt="show" /> 
+- BFGS
+<img src="./results/BFGS.gif" alt="show" /> 
+- LBFGS
+<img src="./results/LBFGS.gif" alt="show" /> 
+- Trust Region
+<img src="./results/TrustRegion.gif" alt="show" /> 
+- Gradient Descent with momentum and fixed learning rate
+<img src="./results/Momentum.gif" alt="show" /> 
+- Adam
+<img src="./results/ADAM.gif" alt="show" /> 
+## Constrained Optimization 
+- Penalty (not visualize)
+- Augmented Lagrangian (not visualize)
+
 <font color=#288FD4  size=5 >Linear Elastic FEM</font>  
 <img src="./results/Linera_Elastic_FEM.gif" alt="show" />  
 
