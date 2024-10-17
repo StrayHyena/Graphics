@@ -107,3 +107,10 @@ Taichi -- 1.6.0
 
 <font color=#288FD4  size=5 >Delaunay Triangluation</font>  
 <img src="./results/triangluation.gif" alt="show" />  
+
+<font color=#288FD4  size=5 >Mean Value Coordinate</font>  
+<img src="./results/MVC.png" alt="show" />  
+
+<font color=#288FD4  size=5 >Deformation Transfer</font> 
+- Deformation Transfer for Triangle Meshes 
+<img src="./results/DeformationTransfer.png" alt="show" />  
