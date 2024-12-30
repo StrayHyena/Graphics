@@ -99,6 +99,24 @@ Taichi -- 1.6.0
 <font color=#288FD4  size=5 >2D surface area heuristic BVH</font>  
 <img src="./results/bvh2d.gif" alt="show" />  
 
+# Discrete Differential Geometry
+| Tree-Cotree  | Generators | HarmonicBasis  |
+|:------:|:-----:|:-----:|
+|  <img src="./results/torus_treecotree.png" alt="show" />   | <img src="./results/torus_generators.png" alt="show" />   | <img src="./results/torus_harmonicbases0.png" alt="show" />  |
+|   |    | <img src="./results/torus_harmonicbases1.png" alt="show" /> |
+
+## Hodge Decomposition
+|  ω | dα | δβ  |
+|:------:|:-----:|:-----:|
+|  <img src="./results/bunny_omega.png" alt="show" />   | <img src="./results/bunny_d_alpha.png" alt="show" />   | <img src="./results/bunny_delta_beta.png" alt="show" />  |
+
+|  parallel vector | geodesics  |
+|:------:|:-----:|
+|  <img src="./results/bunny_parallelvector.png" alt="show" />   | <img src="./results/bunny_geodesics.png" alt="show" />   | 
+
+## SpectralConformalParameterization
+<img src="./results/SpectralConformalParameterization.png" alt="show" />
+
 <font color=#288FD4  size=5 >Bezier and BSpline Curve</font>  
 <img src="./results/control_point_curve.gif" alt="show" />  
 
