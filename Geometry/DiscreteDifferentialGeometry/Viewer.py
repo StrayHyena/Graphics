@@ -8,6 +8,7 @@ class Viewer:
         el = mesh.edges_unique_length.mean()
         self.vn ,self.en, self.fn = len(mesh.vertices), len(mesh.edges_unique), len(mesh.faces)
         self.default_point_scalar = np.zeros(self.vn)
+        self.default_point_vector  = np.zeros_like(mesh.vertices)
         self.default_face_vector  = np.zeros_like(mesh.faces)
         self.lineSegmentNum = self.fn*10 # 画线段，最大的线段数量。随便设的，但是要设大一些
         self.line_start = np.zeros((self.lineSegmentNum,3))
@@ -18,6 +19,8 @@ class Viewer:
         self.wireframe_mesh = mlab.triangular_mesh(vxs,vys,vzs,mesh.faces,representation='wireframe',color=(0,0,0))
 
         self.point_scalar = mlab.points3d(vxs,vys,vzs,self.default_point_scalar, scale_factor=el*0.2, scale_mode = 'none', colormap=colormap)
+        self.point_vector = mlab.quiver3d(vxs,vys,vzs,self.default_point_vector[:, 0], self.default_point_vector[:, 1],
+                                         self.default_point_vector[:, 2],scale_factor=el * 0.5, scale_mode='none', mode='arrow', colormap=colormap)
         self.face_vector  = mlab.quiver3d(mesh.triangles_center[:, 0], mesh.triangles_center[:, 1], mesh.triangles_center[:, 2],
                       self.default_face_vector[:, 0], self.default_face_vector[:, 1], self.default_face_vector[:, 2],
                       scale_factor=el*0.5, scale_mode='none',mode='arrow', colormap=colormap)
@@ -36,7 +39,7 @@ class Viewer:
         self.Clear()
 
     def Clear(self):
-        self.point_scalar.visible = self.face_vector.visible = self.lines.visible  = False
+        self.point_scalar.visible = self.point_vector.visible = self.face_vector.visible = self.lines.visible  = False
         self.line_start.fill(0)
         self.line_stretch.fill(0)
 
@@ -62,9 +65,12 @@ class Viewer:
         elif data.shape == (self.vn,):
             self.point_scalar.mlab_source.scalars = data
             self.point_scalar.visible = True
-        elif data.shape == (self.fn,3):
+        elif data.shape == (self.fn,3) or data.shape == (2*self.fn,3) :
             self.face_vector.mlab_source.vectors = data
             self.face_vector.visible = True
+        elif data.shape == (self.vn,3) or data.shape == (2*self.vn,3) :
+            self.point_vector.mlab_source.vectors = data
+            self.point_vector.visible = True
 
 @mlab.animate(delay=500)
 def Draw(viewer):
@@ -74,11 +80,16 @@ def Draw(viewer):
 
 BUNNY,TORUS,FACE = 0,1,2
 
-def Main(testcase=TORUS):
+def Main(testcase):
     if testcase == FACE:
         mesh = Mesh(os.path.join(__file__, '..', 'input', 'face.obj'))
-        mesh.VisualizeParameterization(mesh.SpectralConformalParameterization())
-        return
+        tangent,bitangent = mesh.VisualizeParameterization3D(mesh.SpectralConformalParameterization())
+        data = {
+            'tangent(u)':tangent,
+            'bitangent(v)':bitangent,
+        }
+        # mesh.VisualizeParameterization(mesh.SpectralConformalParameterization())
+        # return
     if testcase == BUNNY:
         mesh = Mesh(os.path.join(__file__,'..','input','bunny.obj'))
         omega,d_alpha,delta_beta = mesh.HodgeDecompositionTest()

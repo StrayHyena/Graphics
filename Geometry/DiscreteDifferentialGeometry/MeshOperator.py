@@ -338,6 +338,21 @@ class Mesh(trimesh.Trimesh):
         print('WARNING: Spectral Conformal Parameterization may not converge')
         return x
 
+    def VisualizeParameterization3D(self, uv):
+        u, v = np.real(uv), np.imag(uv)
+        u1,v1 = np.array([u[vj]-u[vi] for vi,vj in self.edges_unique]),np.array([v[vj]-v[vi] for vi,vj in self.edges_unique])
+        fu1,fv1 = self.Whitney1Form(u1),self.Whitney1Form(v1)
+        return fu1,fv1
+        def vertex1f(f):
+            ret = np.zeros((self.vn,3))
+            vtx_area = np.zeros(self.vn)
+            for fi,value in enumerate(f):
+                for vi in self.faces[fi]:
+                    ret[vi]+=value*self.area_faces[fi]
+            return ret
+        vu1,vv1 = vertex1f(fu1),vertex1f(fv1)
+        return vu1,vv1
+
     def VisualizeParameterization(self,uv):
         from matplotlib import pyplot as plt
         u,v = np.real(uv),np.imag(uv)

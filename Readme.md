@@ -115,7 +115,11 @@ Taichi -- 1.6.0
 |  <img src="./results/bunny_parallelvector.png" alt="show" />   | <img src="./results/bunny_geodesics.png" alt="show" />   | 
 
 ## SpectralConformalParameterization
-<img src="./results/SpectralConformalParameterization.png" alt="show" />
+|  uv in 2d | uv encoded in vertex | uv encoded on face  |
+|:------:|:-----:|:-----:|
+|  <img src="./results/SpectralConformalParameterization.png" alt="show" />   | <img src="./results/vertex_u.png" alt="show" />  | <img src="./results/face_u.png" alt="show" /> |
+|     | <img src="./results/vertex_v.png" alt="show" />  | <img src="./results/face_v.png" alt="show" /> |
+
 
 <font color=#288FD4  size=5 >Bezier and BSpline Curve</font>  
 <img src="./results/control_point_curve.gif" alt="show" />  
