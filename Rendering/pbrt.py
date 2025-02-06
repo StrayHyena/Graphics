@@ -9,17 +9,18 @@ Array   = ti.types.vector( 200  ,ti.i32)
 vec3    = ti.types.vector(3,ti.f64)
 vec3i   = ti.types.vector(3, ti.i32)
 Medium   = ti.types.struct(eta=ti.f64,k=ti.f64)
-Material = ti.types.struct( albedo=vec3,mdm=Medium,type=ti.i32)
+Material = ti.types.struct( albedo=vec3,mdm=Medium,type=ti.i32,alpha=ti.f64)
 
-MAXDEPTH = 10
+MAXDEPTH = 100
 WIDTH,HEIGHT = 400,400
 EPS = 1e-8
 MAX = 1.7976931348623157e+308
 NOHIT = MAX
 MAX3 = vec3(MAX,MAX,MAX)
-FNone,  INone,  RR,     ENUM_LIGHT = -1.0,  -1,     0.9,       0
+FNone,  INone,  RR,     ENUM_LIGHT = -1.0,  -1,     1.0,       0
 FURNACETEST = False
-Air,Glass = Medium(eta=1,k=0),Medium(eta=1.5,k=0)
+# https://refractiveindex.info/  R 630 nm ,G 532 nm ,B 465 nm
+Air,Glass,Gold = Medium(eta=1,k=0),Medium(eta=1.5,k=0),Medium(eta=0.47,k=2.83)
 
 @ti.dataclass
 class Ray:
@@ -67,7 +68,7 @@ class Intersection:
     tangent:vec3
     pos:vec3
     mat:Material
-    isRayInAir:ti.u8
+    isRayInAir:ti.u1
     mdmT:Medium
     @ti.func
     def HasValue(self):
@@ -92,6 +93,8 @@ class Intersection:
             tangent[(axis + 1) % 3] = - self.normal[axis]
             self.tangent = tangent.normalized()
             self.isRayInAir = True if self.ray.d.dot(-self.normal) > 0 else False # NOTE: mesh's normal always points outside
+            self.mdmT = self.mat.mdm  # transmission medium
+            if not self.isRayInAir:self.mdmT = Air
         return self
 
 class BxDF:
@@ -101,6 +104,22 @@ class BxDF:
         Transmission = enum.auto() # reflection_specular  transmission_specular
         Microfacet  = enum.auto()  # reflection_glossy
     Sample = ti.types.struct(pdf=ti.f64,ray=Ray,bxdf_value=vec3)
+    @ti.func
+    def SampleUniformDiskPolar(u):
+        r,theta = ti.sqrt(u[0]),2*tm.pi*u[1]
+        return r*ti.cos(theta),r*ti.sin(theta)
+    @ti.func
+    def Sample_wm(w,u,ax,az):
+        wh = vec3(ax*w.x,w.y,az*w.z).normalized()
+        if wh.y<0:wh.y=-wh.y
+        t1 = vec3(0,1,0).cross(wh).normalized() if wh.y<0.999999 else vec3(1,0,0)
+        t2 = wh.cross(t1)
+        p = BxDF.SampleUniformDiskPolar(u)
+        h = ti.sqrt(1-p[0]**2)
+        p[1] = (1+wh.y)*0.5*(1-p[1])+h*p[1]
+        pz = ti.sqrt(ti.max(0,1-p[0]**2+p[1]**2))
+        nh = p[0]*t1+pz*wh+p[1]*t2
+        return vec3(ax*nh[0],ti.max(0,nh[1]),az*nh[2]).normalized()
     @ti.func
     def CosineSampleHemisphere():
         phi,cos_theta = 2*tm.pi*ti.random(),ti.sqrt(ti.random())
@@ -115,8 +134,10 @@ class BxDF:
         binormal = normal.cross(tangent)
         return vec3(v.dot(tangent),v.dot(normal),v.dot(binormal))
     @ti.func
+    def Reflect(wi, n):return (2 * n * wi.dot(n)-wi).normalized()
+    @ti.func
     def Fresnel(i, n, etaI, etaT):
-        cosI = i.dot(n)
+        cosI = ti.max(0,0,ti.min(1,i.dot(n)))
         cosT = ti.sqrt(ti.max(0.0, 1 - (etaI / etaT) ** 2 * (1 - cosI ** 2)))
         r_parl = (etaT * cosI - etaI * cosT) / (etaT * cosI + etaI * cosT)
         r_perp = (etaI * cosI - etaT * cosT) / (etaI * cosI + etaT * cosT)
@@ -126,42 +147,56 @@ class BxDF:
     @ti.func  # https://pbr-book.org/4ed/Reflection_Models/Roughness_Using_Microfacet_Theory eq(9.20)
     def Lambda(cos_theta, alpha):return 0.5 * (ti.sqrt(1 + alpha * alpha * (1.0 / cos_theta / cos_theta - 1)) - 1)
     @ti.func  # https://pbr-book.org/4ed/Reflection_Models/Roughness_Using_Microfacet_Theory eq(9.22)
-    def G_GGX(cos_thetaI, cos_thetaO, alpha):return 1.0 / (1.0 + Lambda(cos_thetaI, alpha) + Lambda(cos_thetaO, alpha))
+    def G_GGX(cos_thetaI, cos_thetaO, alpha):return 1.0 / (1.0 + BxDF.Lambda(cos_thetaI, alpha) + BxDF.Lambda(cos_thetaO, alpha))
+    @ti.func
+    def G1_GGX(cos_theta, alpha):return 1.0 / (1.0 + BxDF.Lambda(cos_theta, alpha) )
+    @ti.func
+    def D(w,wm,a):return BxDF.G1_GGX(w.y,a)/ti.abs(w.y)*BxDF.D_GGX(wm.y,a)*ti.abs(w.dot(wm))
     @ti.func
     def f(wi:vec3,wo:vec3, ix:Intersection):
-        ret = vec3(0)
+        ret,mat,mdmI,mdmT = vec3(0),ix.mat,ix.ray.mdm,ix.mdmT
         if FURNACETEST: ix.mat.albedo = vec3(1)
         if ix.mat.type==BxDF.Type.Lambertian:ret = ix.mat.albedo/tm.pi
-        # https://pbr-book.org/4ed/Reflection_Models/Conductor_BRDF  eq(9.9)
-        elif ix.mat.type==BxDF.Type.Specular:ret = vec3(1)/ti.abs(wo.y)
+        elif ix.mat.type==BxDF.Type.Specular:
+            ret = vec3(1)/ti.abs(wo.y)
         elif ix.mat.type==BxDF.Type.Transmission:ret = vec3(1)/ti.abs(wo.y)
-        # elif ix.mat.type==BxDF.Type.Microfacet:  # https://pbr-book.org/4ed/Reflection_Models/Roughness_Using_Microfacet_Theory eq(9.33)
-        #     h = (wo + wi).normalized()
-        #     ret = D_GGX(h.y, mat.alpha) * G_GGX(wi.y, wo.y, mat.alpha) * Fresnel(wi, h, etaI, etaT) / ti.abs(4 * wi.y * wo.y)
+        elif ix.mat.type==BxDF.Type.Microfacet:
+            h = (wo + wi).normalized()
+            ret = BxDF.D_GGX(h.y, mat.alpha) * BxDF.G_GGX(wi.y, wo.y, mat.alpha) * BxDF.Fresnel(wi, h, mdmI.eta, mdmT.eta) / ti.abs(4 * wi.y * wo.y)
         return ret
     @ti.func
     def SampleF(ix:Intersection):
         N,T,n = ix.normal,ix.tangent,vec3(0,1,0)  # N: world normal, T: world tangent, n: local normal
-        wi,wo,pdf = BxDF.ToLocal(-ix.ray.d,N,T).normalized(),vec3(0),0.
+        wi,wo,pdf,f = BxDF.ToLocal(-ix.ray.d,N,T).normalized(),vec3(0),0.,MAX3 # use MAX3 to expose problem
         isNextRayInAir = ix.isRayInAir
+        if FURNACETEST: ix.mat.albedo = vec3(1)
         if ix.mat.type==BxDF.Type.Lambertian:
             wo = BxDF.CosineSampleHemisphere()
             pdf = wo.y/tm.pi
+            f = ix.mat.albedo/tm.pi
         elif ix.mat.type==BxDF.Type.Specular:
-            wo = vec3(-wi[0],wi[1],-wi[2])
-            pdf = 1
+            wo,pdf = BxDF.Reflect(wi,n),1
+            f = vec3(1)/ti.abs(wo.y) # https://pbr-book.org/4ed/Reflection_Models/Conductor_BRDF  eq(9.9)
         elif ix.mat.type==BxDF.Type.Transmission:
-            mdmI, mdmT = ix.ray.mdm, ix.mat.mdm
-            if not ix.isRayInAir: mdmT = Air  # 入射光在mat.mdm,折射光在Air
-            cosI,eta = wi.dot(n), mdmT.eta/mdmI.eta
+            cosI,eta = wi.dot(n), ix.mdmT.eta/ix.ray.mdm.eta
             if cosI<0:cosI,n = -cosI,-n
             wo =  (-wi/eta + (cosI/eta - ti.sqrt(1 - (1/eta)**2 * (1 -cosI**2))) * n).normalized()
-            if ti.random()<BxDF.Fresnel(wi,n,mdmI.eta,mdmT.eta): wo = vec3(-wi[0],wi[1],-wi[2]) # specular
-            else:                                                isNextRayInAir = not isNextRayInAir
-            pdf = 1
+            if ti.random()<BxDF.Fresnel(wi,n,ix.ray.mdm.eta,ix.mdmT.eta):
+                wo = BxDF.Reflect(wi,n)
+            else: isNextRayInAir = not isNextRayInAir
+            pdf,f = 1,vec3(1)/ti.abs(wo.y)
+        elif ix.mat.type==BxDF.Type.Microfacet:
+            wh = BxDF.Sample_wm(wi,[ti.random(),ti.random()],ix.mat.alpha,ix.mat.alpha)
+            wo = BxDF.Reflect(wi, wh)
+            pdf = BxDF.D(wo,wh,ix.mat.alpha)/4/wo.dot(wh)
+            # https://pbr-book.org/4ed/Reflection_Models/Roughness_Using_Microfacet_Theory eq(9.33)
+            f = BxDF.D_GGX(wh.y, ix.mat.alpha) * BxDF.G_GGX(wi.y, wo.y, ix.mat.alpha) * BxDF.Fresnel(wi, wh, ix.ray.mdm.eta, ix.mdmT.eta) / ti.abs(4 * wi.y * wo.y)
+            assert pdf>0
+            # print(wh,pdf,f)
+            # print(pdf)
         nextRayO,nextRayMdm = ix.pos+ix.normal*EPS, Air
         if not isNextRayInAir:  nextRayO,nextRayMdm = ix.pos - ix.normal*EPS,   ix.mat.mdm
-        return BxDF.Sample(pdf=pdf,  ray=Ray(o=nextRayO,d=BxDF.ToWorld(wo,N,T).normalized(),mdm=nextRayMdm), bxdf_value=BxDF.f(wi,wo,ix))
+        return BxDF.Sample(pdf=pdf,  ray=Ray(o=nextRayO,d=BxDF.ToWorld(wo,N,T).normalized(),mdm=nextRayMdm), bxdf_value=f)
 
 class Mesh(trimesh.Trimesh):
     def __init__(self,objpath,material):
@@ -367,10 +402,10 @@ class Film:
 
 Film(Scene([
     Mesh('./assets/Cornell/quad_top.obj',       Material(albedo=vec3(0.9),mdm=Air,type=BxDF.Type.Lambertian)),
-    Mesh('./assets/Cornell/quad_bottom.obj',    Material(albedo=vec3(0.9),mdm=Air,type=BxDF.Type.Lambertian)),
+    Mesh('./assets/Cornell/quad_bottom.obj',    Material(albedo=vec3(0.9),mdm=Gold,type=BxDF.Type.Microfacet,alpha = 1)),
     Mesh('./assets/Cornell/quad_left.obj',      Material(albedo=vec3(0.6, 0, 0),mdm=Air,type=BxDF.Type.Lambertian)),
     Mesh('./assets/Cornell/quad_right.obj',     Material(albedo=vec3(0., 0.6, 0.),mdm=Air,type=BxDF.Type.Lambertian)),
     Mesh('./assets/Cornell/quad_back.obj',      Material(albedo=vec3(0.9),mdm=Air,type=BxDF.Type.Lambertian)),
     Mesh('./assets/Cornell/lightSmall.obj',     Material(albedo=vec3(50),mdm=Air,type=ENUM_LIGHT)),
-    Mesh('./assets/Cornell/bunny.obj',          Material(albedo=vec3(0.3,0.6,0.9),mdm=Glass,type=BxDF.Type.Transmission)),
+    Mesh('./assets/Cornell/sphere.obj',          Material(albedo=vec3(0.3,0.6,0.9),mdm=Glass,type=BxDF.Type.Lambertian)),
 ])).Show()
