@@ -201,6 +201,14 @@ class BxDF:
         if not isNextRayInAir:  nextRayO,nextRayMdm = ix.pos - ix.normal*EPS,   ix.mat.mdm
         return BxDF.Sample(pdf=pdf,  ray=Ray(o=nextRayO,d=BxDF.ToWorld(wi,N,T).normalized(),mdm=nextRayMdm), bxdf_value=f)
 
+class Utils:
+    @staticmethod
+    def DiffuseLike(color):return Material(albedo=color,type=BxDF.Type.Lambertian)
+    @staticmethod
+    def MetalLike(m,rx,ry):return Material(mdm=m,type=BxDF.Type.Microfacet,ax=rx,ay=ry)
+    @staticmethod
+    def GlassLike(m): return Material(mdm=m,type=BxDF.Type.Lambertian)
+
 class Mesh(trimesh.Trimesh):
     def __init__(self,objpath,material):
         mesh = trimesh.load(objpath,process=False)
@@ -418,11 +426,11 @@ class Film:
             window.show()
 
 Film(Scene([
-    Mesh('./assets/Cornell/quad_top.obj',       Material(albedo=vec3(0.9),mdm=Air,type=BxDF.Type.Lambertian)),
-    Mesh('./assets/Cornell/quad_bottom.obj',    Material(albedo=vec3(0.9),mdm=Air,type=BxDF.Type.Lambertian,ax = 0.1,ay=0.1)),
-    Mesh('./assets/Cornell/quad_left.obj',      Material(albedo=vec3(0.6, 0, 0),mdm=Air,type=BxDF.Type.Lambertian)),
-    Mesh('./assets/Cornell/quad_right.obj',     Material(albedo=vec3(0., 0.6, 0.),mdm=Air,type=BxDF.Type.Lambertian)),
-    Mesh('./assets/Cornell/quad_back.obj',      Material(albedo=vec3(0.9),mdm=Air,type=BxDF.Type.Lambertian)),
-    Mesh('./assets/Cornell/lightSmall.obj',     Material(albedo=vec3(50),mdm=Air,type=ENUM_LIGHT)),
-    Mesh('./assets/Cornell/sphere.obj',         Material(albedo=vec3(0.3,0.6,0.9),mdm=Gold,type=BxDF.Type.Microfacet,ax = 0.5,ay=0.1)),
+    Mesh('./assets/Cornell/quad_top.obj',       Utils.DiffuseLike(vec3(0.9))),
+    Mesh('./assets/Cornell/quad_bottom.obj',    Utils.DiffuseLike(vec3(0.9))),
+    Mesh('./assets/Cornell/quad_left.obj',      Utils.DiffuseLike(vec3(0.6, 0, 0))),
+    Mesh('./assets/Cornell/quad_right.obj',     Utils.DiffuseLike(vec3(0., 0.6, 0.))),
+    Mesh('./assets/Cornell/quad_back.obj',      Utils.DiffuseLike(vec3(0.9))),
+    Mesh('./assets/Cornell/lightSmall.obj',     Material(albedo=vec3(50),type=ENUM_LIGHT)),
+    Mesh('./assets/Cornell/sphere.obj',         Utils.MetalLike(Gold,0.1,0.4)),
 ])).Show()
