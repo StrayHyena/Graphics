@@ -8,19 +8,19 @@ ti.init(arch=ti.cpu,default_fp  =ti.f64,debug=True)
 Array   = ti.types.vector( 200  ,ti.i32)
 vec3    = ti.types.vector(3,ti.f64)
 vec3i   = ti.types.vector(3, ti.i32)
-Medium   = ti.types.struct(eta=ti.f64,k=ti.f64)
-Material = ti.types.struct( albedo=vec3,mdm=Medium,type=ti.i32,alpha=ti.f64)
+Medium   = ti.types.struct(eta=vec3,k=vec3)
+Material = ti.types.struct( albedo=vec3,mdm=Medium,type=ti.i32,ax=ti.f64,ay=ti.f64)
 
-MAXDEPTH = 100
+FURNACETEST = False
+MAXDEPTH = 100 if FURNACETEST else 10
 WIDTH,HEIGHT = 400,400
 EPS = 1e-8
 MAX = 1.7976931348623157e+308
 NOHIT = MAX
 MAX3 = vec3(MAX,MAX,MAX)
 FNone,  INone,  RR,     ENUM_LIGHT = -1.0,  -1,     1.0,       0
-FURNACETEST = False
 # https://refractiveindex.info/  R 630 nm ,G 532 nm ,B 465 nm
-Air,Glass,Gold = Medium(eta=1,k=0),Medium(eta=1.5,k=0),Medium(eta=0.47,k=2.83)
+Air,Glass,Gold = Medium(eta=vec3(1),k=vec3(0)),Medium(eta=vec3(1.5),k=vec3(0)),Medium(eta=vec3(0.18836,0.54386,1.3319),k=vec3(3.4034,2.2309,1.8693))
 
 @ti.dataclass
 class Ray:
@@ -83,15 +83,10 @@ class Intersection:
                 j,k = (i+1)%3,(i+2)%3
                 ws[i] = (self.pos-scene.vertices[face[j]]).cross(self.pos-scene.vertices[face[k]]).norm()/area
             self.normal = (ws[0]*scene.vertex_normals[face[0]]+ws[1]*scene.vertex_normals[face[1]]+ws[2]*scene.vertex_normals[face[2]]).normalized()
+            t = (ws[0]*scene.vertex_tangents[face[0]]+ws[1]*scene.vertex_tangents[face[1]]+ws[2]*scene.vertex_tangents[face[2]]).normalized()
+            self.tangent = self.normal.cross(t.cross(self.normal)).normalized() # force orthogonal because  t is interpolated tangent , that may not perpendicular to self.normal
             # self.normal = scene.face_normals[self.fi]
             self.mat = scene.face_materials[self.fi]
-            axis = 0
-            while self.normal[axis] == 0: axis += 1
-            assert self.normal[axis] != 0
-            tangent = vec3(0)
-            tangent[axis] = self.normal[(axis + 1) % 3]
-            tangent[(axis + 1) % 3] = - self.normal[axis]
-            self.tangent = tangent.normalized()
             self.isRayInAir = True if self.ray.d.dot(-self.normal) > 0 else False # NOTE: mesh's normal always points outside
             self.mdmT = self.mat.mdm  # transmission medium
             if not self.isRayInAir:self.mdmT = Air
@@ -105,6 +100,15 @@ class BxDF:
         Microfacet  = enum.auto()  # reflection_glossy
     Sample = ti.types.struct(pdf=ti.f64,ray=Ray,bxdf_value=vec3)
     @ti.func
+    def CosTheta(w):return w.y
+    @ti.func
+    def CosTheta2(w): return w.y**2
+    @ti.func
+    def CosPhi2(w): return w.x**2/(1-BxDF.CosTheta2(w))
+    @ti.func
+    def SinPhi2(w): return 1 - BxDF.CosPhi2(w)
+
+    @ti.func
     def SampleUniformDiskPolar(u):
         r,theta = ti.sqrt(u[0]),2*tm.pi*u[1]
         return r*ti.cos(theta),r*ti.sin(theta)
@@ -116,10 +120,11 @@ class BxDF:
         t2 = wh.cross(t1)
         p = BxDF.SampleUniformDiskPolar(u)
         h = ti.sqrt(1-p[0]**2)
-        p[1] = (1+wh.y)*0.5*(1-p[1])+h*p[1]
-        pz = ti.sqrt(ti.max(0,1-p[0]**2+p[1]**2))
+        p[1] = (1-(1 + wh.y) / 2) * h + (1 + wh.y) / 2 * p[1]
+        # p[1] = (1+wh.y)*0.5*(1-p[1])+h*p[1]
+        pz = ti.sqrt(ti.max(0,1-p[0]**2-p[1]**2))
         nh = p[0]*t1+pz*wh+p[1]*t2
-        return vec3(ax*nh[0],ti.max(0,nh[1]),az*nh[2]).normalized()
+        return vec3(ax*nh[0],ti.max(EPS,nh[1]),az*nh[2]).normalized()
     @ti.func
     def CosineSampleHemisphere():
         phi,cos_theta = 2*tm.pi*ti.random(),ti.sqrt(ti.random())
@@ -135,74 +140,94 @@ class BxDF:
         return vec3(v.dot(tangent),v.dot(normal),v.dot(binormal))
     @ti.func
     def Reflect(wi, n):return (2 * n * wi.dot(n)-wi).normalized()
-    @ti.func
-    def Fresnel(i, n, etaI, etaT):
-        cosI = ti.max(0,0,ti.min(1,i.dot(n)))
-        cosT = ti.sqrt(ti.max(0.0, 1 - (etaI / etaT) ** 2 * (1 - cosI ** 2)))
-        r_parl = (etaT * cosI - etaI * cosT) / (etaT * cosI + etaI * cosT)
-        r_perp = (etaI * cosI - etaT * cosT) / (etaI * cosI + etaT * cosT)
-        return 0.5 * (r_parl ** 2 + r_perp ** 2)
+    @ti.func #https://seblagarde.wordpress.com/2013/04/29/memo-on-fresnel-equations/ eq([1])
+    def Fresnel(i, n, mdmI, mdmT):  # only consider Dielectric-Conductor Dielectric-Dielectric
+        eta,etak,cos_theta = mdmT.eta/mdmI.eta,mdmT.k/mdmI.eta,ti.abs(i.dot(n))
+        cos_theta2 = cos_theta**2
+        sin_theta2 = 1 - cos_theta2
+        eta2,etak2 = eta**2,etak**2
+        t0 = eta2-etak2-sin_theta2
+        A2plusB2 = ti.sqrt(t0**2+4*etak**2)
+        t1,a = A2plusB2+cos_theta2,ti.sqrt(0.5*(A2plusB2+t0))
+        t2 = 2*a*cos_theta
+        Rs = (t1-t2) /(t1+t2)
+        t3,t4 = cos_theta2*A2plusB2+sin_theta2**2,t2*sin_theta2
+        Rp = Rs*(t3-t4)/(t3+t4)
+        return 0.5 * (Rs+Rp)
     @ti.func  # https://pbr-book.org/4ed/Reflection_Models/Roughness_Using_Microfacet_Theory eq(9.16)
-    def D_GGX(cos_theta, alpha):return alpha ** 2 / (tm.pi * (cos_theta ** 2 * (alpha ** 2 - 1) + 1) ** 2)
+    def D(w,ax,ay):
+        ct2,cp2,sp2 = BxDF.CosTheta2(w),BxDF.CosPhi2(w),BxDF.SinPhi2(w)
+        return 1.0/(tm.pi*ax*ay*ct2**2*(1+(1/ct2-1)*(cp2/ax**2+sp2/ay**2))**2)
     @ti.func  # https://pbr-book.org/4ed/Reflection_Models/Roughness_Using_Microfacet_Theory eq(9.20)
-    def Lambda(cos_theta, alpha):return 0.5 * (ti.sqrt(1 + alpha * alpha * (1.0 / cos_theta / cos_theta - 1)) - 1)
+    def Lambda(w,ax,ay):
+        ct2,cp2,sp2 = BxDF.CosTheta2(w),BxDF.CosPhi2(w),BxDF.SinPhi2(w)
+        return ti.sqrt(1+(ax**2*cp2+ay**2*sp2)*(1/ct2-1))/2-0.5
     @ti.func  # https://pbr-book.org/4ed/Reflection_Models/Roughness_Using_Microfacet_Theory eq(9.22)
-    def G_GGX(cos_thetaI, cos_thetaO, alpha):return 1.0 / (1.0 + BxDF.Lambda(cos_thetaI, alpha) + BxDF.Lambda(cos_thetaO, alpha))
+    def G(wi,wo,ax,ay):return 1.0/(1.0+BxDF.Lambda(wi,ax,ay)+BxDF.Lambda(wo,ax,ay))
     @ti.func
-    def G1_GGX(cos_theta, alpha):return 1.0 / (1.0 + BxDF.Lambda(cos_theta, alpha) )
+    def G1(w,ax,ay): return 1.0 / (1.0 + BxDF.Lambda(w, ax,ay) )
     @ti.func
-    def D(w,wm,a):return BxDF.G1_GGX(w.y,a)/ti.abs(w.y)*BxDF.D_GGX(wm.y,a)*ti.abs(w.dot(wm))
-    @ti.func
-    def f(wi:vec3,wo:vec3, ix:Intersection):
-        ret,mat,mdmI,mdmT = vec3(0),ix.mat,ix.ray.mdm,ix.mdmT
-        if FURNACETEST: ix.mat.albedo = vec3(1)
-        if ix.mat.type==BxDF.Type.Lambertian:ret = ix.mat.albedo/tm.pi
-        elif ix.mat.type==BxDF.Type.Specular:
-            ret = vec3(1)/ti.abs(wo.y)
-        elif ix.mat.type==BxDF.Type.Transmission:ret = vec3(1)/ti.abs(wo.y)
-        elif ix.mat.type==BxDF.Type.Microfacet:
-            h = (wo + wi).normalized()
-            ret = BxDF.D_GGX(h.y, mat.alpha) * BxDF.G_GGX(wi.y, wo.y, mat.alpha) * BxDF.Fresnel(wi, h, mdmI.eta, mdmT.eta) / ti.abs(4 * wi.y * wo.y)
-        return ret
+    def D_PDF(w,wm,ax,ay):return BxDF.G1(w,ax,ay)/ti.abs(BxDF.CosTheta(w))*BxDF.D(wm,ax,ay)*ti.abs(w.dot(wm))
     @ti.func
     def SampleF(ix:Intersection):
         N,T,n = ix.normal,ix.tangent,vec3(0,1,0)  # N: world normal, T: world tangent, n: local normal
-        wi,wo,pdf,f = BxDF.ToLocal(-ix.ray.d,N,T).normalized(),vec3(0),0.,MAX3 # use MAX3 to expose problem
+        wo,wi,pdf,f = BxDF.ToLocal(-ix.ray.d,N,T).normalized(),vec3(0),0.,vec3(MAX,0,0) # use MAX RED to expose problem
         isNextRayInAir = ix.isRayInAir
         if FURNACETEST: ix.mat.albedo = vec3(1)
         if ix.mat.type==BxDF.Type.Lambertian:
-            wo = BxDF.CosineSampleHemisphere()
-            pdf = wo.y/tm.pi
+            wi = BxDF.CosineSampleHemisphere()
+            pdf = wi.y/tm.pi
             f = ix.mat.albedo/tm.pi
         elif ix.mat.type==BxDF.Type.Specular:
-            wo,pdf = BxDF.Reflect(wi,n),1
-            f = vec3(1)/ti.abs(wo.y) # https://pbr-book.org/4ed/Reflection_Models/Conductor_BRDF  eq(9.9)
+            wi,pdf = BxDF.Reflect(wo,n),1
+            f = vec3(1)/ti.abs(BxDF.CosTheta(wi)) # https://pbr-book.org/4ed/Reflection_Models/Conductor_BRDF  eq(9.9)
         elif ix.mat.type==BxDF.Type.Transmission:
-            cosI,eta = wi.dot(n), ix.mdmT.eta/ix.ray.mdm.eta
+            cosI,eta = wo.dot(n), ix.mdmT.eta/ix.ray.mdm.eta
             if cosI<0:cosI,n = -cosI,-n
-            wo =  (-wi/eta + (cosI/eta - ti.sqrt(1 - (1/eta)**2 * (1 -cosI**2))) * n).normalized()
-            if ti.random()<BxDF.Fresnel(wi,n,ix.ray.mdm.eta,ix.mdmT.eta):
-                wo = BxDF.Reflect(wi,n)
+            wi =  (-wo/eta + (cosI/eta - ti.sqrt(1 - (1/eta)**2 * (1 -cosI**2))) * n).normalized()
+            if ti.random()<BxDF.Fresnel(wo,n,ix.ray.mdm,ix.mdmT)[0]: # for Dielectric to Dielectric fresnel's rgb are identical
+                wi = BxDF.Reflect(wo,n)
             else: isNextRayInAir = not isNextRayInAir
-            pdf,f = 1,vec3(1)/ti.abs(wo.y)
+            pdf,f = 1,vec3(1)/ti.abs(BxDF.CosTheta(wi))
         elif ix.mat.type==BxDF.Type.Microfacet:
-            wh = BxDF.Sample_wm(wi,[ti.random(),ti.random()],ix.mat.alpha,ix.mat.alpha)
-            wo = BxDF.Reflect(wi, wh)
-            pdf = BxDF.D(wo,wh,ix.mat.alpha)/4/wo.dot(wh)
+            ax,ay = ix.mat.ax,ix.mat.ay
+            wm = BxDF.Sample_wm(wo,[ti.random(),ti.random()],ax,ay)
+            wi = BxDF.Reflect(wo, wm)
             # https://pbr-book.org/4ed/Reflection_Models/Roughness_Using_Microfacet_Theory eq(9.33)
-            f = BxDF.D_GGX(wh.y, ix.mat.alpha) * BxDF.G_GGX(wi.y, wo.y, ix.mat.alpha) * BxDF.Fresnel(wi, wh, ix.ray.mdm.eta, ix.mdmT.eta) / ti.abs(4 * wi.y * wo.y)
-            assert pdf>0
-            # print(wh,pdf,f)
-            # print(pdf)
+            pdf = BxDF.D_PDF(wo,wm,ax,ay)/4/ti.abs(wo.dot(wm))
+            f   = BxDF.D(wm,ax,ay)*BxDF.G(wi,wo,ax,ay)*BxDF.Fresnel(wo, wm, ix.ray.mdm, ix.mdmT) / ti.abs(4 * BxDF.CosTheta(wi) * BxDF.CosTheta(wo))
+            # if FURNACETEST: f/=BxDF.Fresnel(wo, wm, ix.ray.mdm, ix.mdmT)
         nextRayO,nextRayMdm = ix.pos+ix.normal*EPS, Air
         if not isNextRayInAir:  nextRayO,nextRayMdm = ix.pos - ix.normal*EPS,   ix.mat.mdm
-        return BxDF.Sample(pdf=pdf,  ray=Ray(o=nextRayO,d=BxDF.ToWorld(wo,N,T).normalized(),mdm=nextRayMdm), bxdf_value=f)
+        return BxDF.Sample(pdf=pdf,  ray=Ray(o=nextRayO,d=BxDF.ToWorld(wi,N,T).normalized(),mdm=nextRayMdm), bxdf_value=f)
 
 class Mesh(trimesh.Trimesh):
     def __init__(self,objpath,material):
-        mesh = trimesh.load(objpath)
-        super().__init__(vertices=mesh.vertices,faces=mesh.faces)
+        mesh = trimesh.load(objpath,process=False)
+        super().__init__(vertices=mesh.vertices,faces=mesh.faces,visual=mesh.visual)
         self.material = material
+        vt = []
+        for n in self.vertex_normals:
+            axis = 0
+            while n[axis] == 0: axis += 1
+            assert n[axis] != 0
+            tangent = np.zeros(3)
+            tangent[axis] = n[(axis + 1) % 3]
+            tangent[(axis + 1) % 3] = - n[axis]
+            vt.append(tangent)
+        self.vertex_tangents = vt
+        if not hasattr(self.visual,'uv'):return
+        ft = np.zeros_like(self.faces).astype(np.float64)
+        for fi,(vi,vj,vk) in  enumerate(self.faces):
+            uv,n = self.visual.uv,self.face_normals[fi]
+            ft[fi] += (uv[vj][0]-uv[vi][0])*np.cross(n,self.vertices[vi]-self.vertices[vk])
+            ft[fi] += (uv[vk][0]-uv[vi][0])*np.cross(n,self.vertices[vj]-self.vertices[vi])
+            ft[fi] /= np.linalg.norm(ft[fi])
+        self.face_tangents = ft
+        vt = np.zeros_like(self.vertex_tangents)
+        for fi,face in enumerate(self.faces):
+            for vi in face: vt[vi]+=ft[fi]*self.area_faces[fi]
+        for vi in range(self.vertices.shape[0]):self.vertex_tangents[vi] = vt[vi]/np.linalg.norm(vt[vi])
 
 class Camera:
     def __init__(self,pos,target,near_plane=0.01,fov = 0.35):
@@ -312,7 +337,8 @@ class Scene:
         self.vn = sum([len(m.vertices) for m in meshes])
         self.fn = sum([len(m.faces) for m in meshes])
         self.vertices = ti.Vector.field(3,ti.f64,self.vn)
-        self.vertex_normals = ti.Vector.field(3,ti.f64,self.vn)
+        self.vertex_normals  = ti.Vector.field(3,ti.f64,self.vn)
+        self.vertex_tangents = ti.Vector.field(3,ti.f64,self.vn)
         self.faces = ti.Vector.field(3,ti.i32,self.fn)
         self.face_normals   = ti.Vector.field(3,ti.f64,self.fn) # normal always points to outside
         self.face_areas     = ti.field(ti.f64,self.fn)
@@ -321,9 +347,11 @@ class Scene:
         self.camera = Camera(pos=vec3(2,0.5,0),target=(0,0.5,0))
         voffset,foffset = 0,0
         for mi,m in enumerate(meshes):
+            if FURNACETEST and m.material.type==ENUM_LIGHT:continue
             for vi,v in enumerate(m.vertices):
                 self.vertices[voffset+vi] = m.vertices[vi]
                 self.vertex_normals[voffset + vi] = m.vertex_normals[vi]
+                self.vertex_tangents[voffset + vi] = m.vertex_tangents[vi]
             for fi,f in enumerate(m.faces):
                 self.faces[foffset+fi] = f+voffset
                 self.face_areas[foffset+fi] = m.area_faces[fi]
@@ -373,17 +401,6 @@ class Scene:
                 ret *= sample.bxdf_value*ti.abs(ray.d.dot(ix.normal))/sample.pdf/RR
             self.img[i,j] = ret
 
-            # self.img[i,j] = ti.Vector([0,0,0])
-            # ix = self.HitBy(ray)
-            # t,triidx = MAX,INone
-            # for fi in range(self.fn):
-            #     tri = self.faces[fi]
-            #     t1 = ray.HitTriangle(self.vertices[tri[0]],self.vertices[tri[1]],self.vertices[tri[2]])
-            #     if t1<t:t,triidx = t1,fi
-            # if t!=ix.t:print(i,j,t,ix.t)
-            # assert t==ix.t
-            # if ix.HasValue() : self.img[i,j] = ix.mat.albedo
-
 class Film:
     def __init__(self,scene):
         self.img = ti.Vector.field(3,ti.f64,(WIDTH,HEIGHT))
@@ -402,10 +419,10 @@ class Film:
 
 Film(Scene([
     Mesh('./assets/Cornell/quad_top.obj',       Material(albedo=vec3(0.9),mdm=Air,type=BxDF.Type.Lambertian)),
-    Mesh('./assets/Cornell/quad_bottom.obj',    Material(albedo=vec3(0.9),mdm=Gold,type=BxDF.Type.Microfacet,alpha = 1)),
+    Mesh('./assets/Cornell/quad_bottom.obj',    Material(albedo=vec3(0.9),mdm=Air,type=BxDF.Type.Lambertian,ax = 0.1,ay=0.1)),
     Mesh('./assets/Cornell/quad_left.obj',      Material(albedo=vec3(0.6, 0, 0),mdm=Air,type=BxDF.Type.Lambertian)),
     Mesh('./assets/Cornell/quad_right.obj',     Material(albedo=vec3(0., 0.6, 0.),mdm=Air,type=BxDF.Type.Lambertian)),
     Mesh('./assets/Cornell/quad_back.obj',      Material(albedo=vec3(0.9),mdm=Air,type=BxDF.Type.Lambertian)),
     Mesh('./assets/Cornell/lightSmall.obj',     Material(albedo=vec3(50),mdm=Air,type=ENUM_LIGHT)),
-    Mesh('./assets/Cornell/sphere.obj',          Material(albedo=vec3(0.3,0.6,0.9),mdm=Glass,type=BxDF.Type.Lambertian)),
+    Mesh('./assets/Cornell/sphere.obj',         Material(albedo=vec3(0.3,0.6,0.9),mdm=Gold,type=BxDF.Type.Microfacet,ax = 0.5,ay=0.1)),
 ])).Show()
