@@ -68,7 +68,7 @@ class Intersection:
     tangent:vec3
     pos:vec3
     mat:Material
-    isRayInAir:ti.u1
+    inside_mesh:ti.u1
     mdmT:Medium
     @ti.func
     def HasValue(self):
@@ -87,9 +87,9 @@ class Intersection:
             self.tangent = self.normal.cross(t.cross(self.normal)).normalized() # force orthogonal because  t is interpolated tangent , that may not perpendicular to self.normal
             # self.normal = scene.face_normals[self.fi]
             self.mat = scene.face_materials[self.fi]
-            self.isRayInAir = True if self.ray.d.dot(-self.normal) > 0 else False # NOTE: mesh's normal always points outside
+            self.inside_mesh = True if self.ray.d.dot(self.normal) > 0 else False # NOTE: mesh's normal always points outside
             self.mdmT = self.mat.mdm  # transmission medium
-            if not self.isRayInAir:self.mdmT = Air
+            if self.inside_mesh:self.mdmT = Air
         return self
 
 class BxDF:
@@ -172,7 +172,7 @@ class BxDF:
     def SampleF(ix:Intersection):
         N,T,n = ix.normal,ix.tangent,vec3(0,1,0)  # N: world normal, T: world tangent, n: local normal
         wo,wi,pdf,f = BxDF.ToLocal(-ix.ray.d,N,T).normalized(),vec3(0),0.,vec3(MAX,0,0) # use MAX RED to expose problem
-        isNextRayInAir = ix.isRayInAir
+        next_ix_inside_mesh = ix.inside_mesh # next intersection inside mesh : default is same with current
         if FURNACETEST: ix.mat.albedo = vec3(1)
         if ix.mat.type==BxDF.Type.Lambertian:
             wi = BxDF.CosineSampleHemisphere()
@@ -187,7 +187,7 @@ class BxDF:
             wi =  (-wo/eta + (cosI/eta - ti.sqrt(1 - (1/eta)**2 * (1 -cosI**2))) * n).normalized()
             if ti.random()<BxDF.Fresnel(wo,n,ix.ray.mdm,ix.mdmT)[0]: # for Dielectric to Dielectric fresnel's rgb are identical
                 wi = BxDF.Reflect(wo,n)
-            else: isNextRayInAir = not isNextRayInAir
+            else: next_ix_inside_mesh = not next_ix_inside_mesh # refraction happens: mesh to air or air to mesh
             pdf,f = 1,vec3(1)/ti.abs(BxDF.CosTheta(wi))
         elif ix.mat.type==BxDF.Type.Microfacet:
             ax,ay = ix.mat.ax,ix.mat.ay
@@ -196,9 +196,8 @@ class BxDF:
             # https://pbr-book.org/4ed/Reflection_Models/Roughness_Using_Microfacet_Theory eq(9.33)
             pdf = BxDF.D_PDF(wo,wm,ax,ay)/4/ti.abs(wo.dot(wm))
             f   = BxDF.D(wm,ax,ay)*BxDF.G(wi,wo,ax,ay)*BxDF.Fresnel(wo, wm, ix.ray.mdm, ix.mdmT) / ti.abs(4 * BxDF.CosTheta(wi) * BxDF.CosTheta(wo))
-            # if FURNACETEST: f/=BxDF.Fresnel(wo, wm, ix.ray.mdm, ix.mdmT)
         nextRayO,nextRayMdm = ix.pos+ix.normal*EPS, Air
-        if not isNextRayInAir:  nextRayO,nextRayMdm = ix.pos - ix.normal*EPS,   ix.mat.mdm
+        if next_ix_inside_mesh:  nextRayO,nextRayMdm = ix.pos - ix.normal*EPS,   ix.mat.mdm
         return BxDF.Sample(pdf=pdf,  ray=Ray(o=nextRayO,d=BxDF.ToWorld(wi,N,T).normalized(),mdm=nextRayMdm), bxdf_value=f)
 
 class Utils:
@@ -207,7 +206,7 @@ class Utils:
     @staticmethod
     def MetalLike(m,rx,ry):return Material(mdm=m,type=BxDF.Type.Microfacet,ax=rx,ay=ry)
     @staticmethod
-    def GlassLike(m): return Material(mdm=m,type=BxDF.Type.Transmission)
+    def GlassLike(eta): return Material(mdm=Medium(eta = vec3(eta)),type=BxDF.Type.Transmission)
 
 class Mesh(trimesh.Trimesh):
     def __init__(self,objpath,material):
@@ -432,5 +431,5 @@ Film(Scene([
     Mesh('./assets/Cornell/quad_right.obj',     Utils.DiffuseLike(vec3(0., 0.6, 0.))),
     Mesh('./assets/Cornell/quad_back.obj',      Utils.DiffuseLike(vec3(0.9))),
     Mesh('./assets/Cornell/lightSmall.obj',     Material(albedo=vec3(50),type=ENUM_LIGHT)),
-    Mesh('./assets/Cornell/sphere.obj',         Utils.GlassLike(Glass)),
+    Mesh('./assets/Cornell/sphere.obj',         Utils.GlassLike(2.)),
 ])).Show()
