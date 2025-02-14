@@ -11,7 +11,7 @@ vec3i   = ti.types.vector(3, ti.i32)
 Medium   = ti.types.struct(eta=vec3,k=vec3)
 Material = ti.types.struct( albedo=vec3,mdm=Medium,type=ti.i32,ax=ti.f64,ay=ti.f64)
 
-FURNACETEST = False
+FURNACETEST,FLAT = False,False
 MAXDEPTH = 100 if FURNACETEST else 10
 WIDTH,HEIGHT = 400,400
 EPS = 1e-8
@@ -81,13 +81,15 @@ class Intersection:
             ws = vec3(0)
             for i in ti.static(range(3)):
                 j,k = (i+1)%3,(i+2)%3
-                ws[i] = (self.pos-scene.vertices[face[j]]).cross(self.pos-scene.vertices[face[k]]).norm()/area
+                ws[i] = (self.pos-scene.vertices[face[j]]).cross(self.pos-scene.vertices[face[k]]).norm()/2/area
+            assert 0<=ws[0]<=1 and 0<=ws[1]<=1 and 0<=ws[2]<=1 and   ti.abs(ws.sum()-1)<EPS
+            # print('here')
             self.normal = (ws[0]*scene.vertex_normals[face[0]]+ws[1]*scene.vertex_normals[face[1]]+ws[2]*scene.vertex_normals[face[2]]).normalized()
             t = (ws[0]*scene.vertex_tangents[face[0]]+ws[1]*scene.vertex_tangents[face[1]]+ws[2]*scene.vertex_tangents[face[2]]).normalized()
             self.tangent = self.normal.cross(t.cross(self.normal)).normalized() # force orthogonal because  t is interpolated tangent , that may not perpendicular to self.normal
-            # self.normal = scene.face_normals[self.fi]
+            if FLAT: self.normal,self.tangent = scene.face_normals[self.fi],scene.face_tangents[self.fi]
             self.mat = scene.face_materials[self.fi]
-            self.inside_mesh = True if self.ray.d.dot(self.normal) > 0 else False # NOTE: mesh's normal always points outside
+            self.inside_mesh = False if (self.ray.mdm.eta - Air.eta).norm()==0 else True  #注意，不能用法线判断。因为如果不是平坦着色，插值结果可能不对
             self.mdmT = self.mat.mdm  # transmission medium
             if self.inside_mesh:self.mdmT = Air
         return self
@@ -197,7 +199,8 @@ class BxDF:
             pdf = BxDF.D_PDF(wo,wm,ax,ay)/4/ti.abs(wo.dot(wm))
             f   = BxDF.D(wm,ax,ay)*BxDF.G(wi,wo,ax,ay)*BxDF.Fresnel(wo, wm, ix.ray.mdm, ix.mdmT) / ti.abs(4 * BxDF.CosTheta(wi) * BxDF.CosTheta(wo))
         nextRayO,nextRayMdm = ix.pos+ix.normal*EPS, Air
-        if next_ix_inside_mesh:  nextRayO,nextRayMdm = ix.pos - ix.normal*EPS,   ix.mat.mdm
+        if next_ix_inside_mesh:nextRayO,nextRayMdm = ix.pos - ix.normal*EPS,   ix.mat.mdm
+        # assert nextRayMdm.eta.norm()>EPS
         return BxDF.Sample(pdf=pdf,  ray=Ray(o=nextRayO,d=BxDF.ToWorld(wi,N,T).normalized(),mdm=nextRayMdm), bxdf_value=f)
 
 class Utils:
@@ -213,16 +216,18 @@ class Mesh(trimesh.Trimesh):
         mesh = trimesh.load(objpath,process=False)
         super().__init__(vertices=mesh.vertices,faces=mesh.faces,visual=mesh.visual)
         self.material = material
-        vt = []
-        for n in self.vertex_normals:
+        def Perpendicular(n):
             axis = 0
             while n[axis] == 0: axis += 1
             assert n[axis] != 0
-            tangent = np.zeros(3)
-            tangent[axis] = n[(axis + 1) % 3]
-            tangent[(axis + 1) % 3] = - n[axis]
-            vt.append(tangent)
-        self.vertex_tangents = vt
+            t = np.zeros(3)
+            t[axis] = n[(axis + 1) % 3]
+            t[(axis + 1) % 3] = - n[axis]
+            return t
+        vt,ft = [],[]
+        for n in self.vertex_normals:vt.append(Perpendicular(n))
+        for n in self.face_normals:ft.append(Perpendicular(n))
+        self.vertex_tangents,self.face_tangents = np.array(vt),np.array(ft)
         if not hasattr(self.visual,'uv'):return
         ft = np.zeros_like(self.faces).astype(np.float64)
         for fi,(vi,vj,vk) in  enumerate(self.faces):
@@ -347,7 +352,8 @@ class Scene:
         self.vertex_normals  = ti.Vector.field(3,ti.f64,self.vn)
         self.vertex_tangents = ti.Vector.field(3,ti.f64,self.vn)
         self.faces = ti.Vector.field(3,ti.i32,self.fn)
-        self.face_normals   = ti.Vector.field(3,ti.f64,self.fn) # normal always points to outside
+        self.face_normals    = ti.Vector.field(3,ti.f64,self.fn) # normal always points to outside
+        self.face_tangents   = ti.Vector.field(3,ti.f64,self.fn) # normal always points to outside
         self.face_areas     = ti.field(ti.f64,self.fn)
         self.face_materials = Material.field(shape=self.fn)
         self.img = ti.Vector.field(3,ti.f64,(WIDTH,HEIGHT))
@@ -363,6 +369,7 @@ class Scene:
                 self.faces[foffset+fi] = f+voffset
                 self.face_areas[foffset+fi] = m.area_faces[fi]
                 self.face_normals[foffset+fi] = m.face_normals[fi]
+                self.face_tangents[foffset+fi] = m.face_tangents[fi]
                 self.face_materials[foffset+fi] = m.material
             voffset += len(m.vertices)
             foffset += len(m.faces)
@@ -399,7 +406,7 @@ class Scene:
             for k in range(MAXDEPTH+1):
                 ix = self.HitBy(ray)
                 if ti.random() > RR or not ix.HasValue() or ix.mat.type==ENUM_LIGHT or k==MAXDEPTH:
-                    if not ix.HasValue(): ret*= (vec3(0.3,0.6,0.9) if FURNACETEST else vec3(0))
+                    if not ix.HasValue(): ret*= (vec3(0.5,0.5,0.5) if FURNACETEST else vec3(0))
                     elif ix.mat.type==ENUM_LIGHT: ret*=(ix.mat.albedo/RR)
                     else: ret*=vec3(0)
                     break
@@ -430,6 +437,8 @@ Film(Scene([
     Mesh('./assets/Cornell/quad_left.obj',      Utils.DiffuseLike(vec3(0.6, 0, 0))),
     Mesh('./assets/Cornell/quad_right.obj',     Utils.DiffuseLike(vec3(0., 0.6, 0.))),
     Mesh('./assets/Cornell/quad_back.obj',      Utils.DiffuseLike(vec3(0.9))),
-    Mesh('./assets/Cornell/lightSmall.obj',     Material(albedo=vec3(50),type=ENUM_LIGHT)),
+    Mesh('./assets/Cornell/bunny.obj',          Utils.DiffuseLike(vec3(0.3,0.6,0.9))),
+    Mesh('./assets/Cornell/torus.obj',          Material(type=BxDF.Type.Specular)),
     Mesh('./assets/Cornell/sphere.obj',         Utils.GlassLike(2.)),
+    Mesh('./assets/Cornell/lightSmall.obj',     Material(albedo=vec3(50),type=ENUM_LIGHT)),
 ])).Show()
