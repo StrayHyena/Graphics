@@ -205,7 +205,7 @@ class BxDF:
 
 class Utils:
     @staticmethod
-    def DiffuseLike(color):return Material(albedo=color,type=BxDF.Type.Lambertian)
+    def DiffuseLike(r,g,b):return Material(albedo=vec3(r,g,b),type=BxDF.Type.Lambertian)
     @staticmethod
     def MetalLike(m,rx,ry):return Material(mdm=m,type=BxDF.Type.Microfacet,ax=rx,ay=ry)
     @staticmethod
@@ -432,12 +432,12 @@ class Film:
             window.show()
 
 Film(Scene([
-    Mesh('./assets/Cornell/quad_top.obj',       Utils.DiffuseLike(vec3(0.9))),
+    Mesh('./assets/Cornell/quad_top.obj',       Utils.DiffuseLike(0.9,0.9,0.9)),
     Mesh('./assets/Cornell/quad_bottom.obj',    Utils.MetalLike(Gold,0.1,0.1)),
-    Mesh('./assets/Cornell/quad_left.obj',      Utils.DiffuseLike(vec3(0.6, 0, 0))),
-    Mesh('./assets/Cornell/quad_right.obj',     Utils.DiffuseLike(vec3(0., 0.6, 0.))),
-    Mesh('./assets/Cornell/quad_back.obj',      Utils.DiffuseLike(vec3(0.9))),
-    Mesh('./assets/Cornell/bunny.obj',          Utils.DiffuseLike(vec3(0.3,0.6,0.9))),
+    Mesh('./assets/Cornell/quad_left.obj',      Utils.DiffuseLike(0.6, 0, 0)),
+    Mesh('./assets/Cornell/quad_right.obj',     Utils.DiffuseLike(0., 0.6, 0.)),
+    Mesh('./assets/Cornell/quad_back.obj',      Utils.DiffuseLike(0.9,0.9,0.9)),
+    Mesh('./assets/Cornell/bunny.obj',          Utils.DiffuseLike(0.3,0.6,0.9)),
     Mesh('./assets/Cornell/torus.obj',          Material(type=BxDF.Type.Specular)),
     Mesh('./assets/Cornell/sphere.obj',         Utils.GlassLike(2.)),
     Mesh('./assets/Cornell/lightSmall.obj',     Material(albedo=vec3(50),type=ENUM_LIGHT)),
