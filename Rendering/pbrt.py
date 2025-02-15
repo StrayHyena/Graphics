@@ -82,8 +82,6 @@ class Intersection:
             for i in ti.static(range(3)):
                 j,k = (i+1)%3,(i+2)%3
                 ws[i] = (self.pos-scene.vertices[face[j]]).cross(self.pos-scene.vertices[face[k]]).norm()/2/area
-            assert 0<=ws[0]<=1 and 0<=ws[1]<=1 and 0<=ws[2]<=1 and   ti.abs(ws.sum()-1)<EPS
-            # print('here')
             self.normal = (ws[0]*scene.vertex_normals[face[0]]+ws[1]*scene.vertex_normals[face[1]]+ws[2]*scene.vertex_normals[face[2]]).normalized()
             t = (ws[0]*scene.vertex_tangents[face[0]]+ws[1]*scene.vertex_tangents[face[1]]+ws[2]*scene.vertex_tangents[face[2]]).normalized()
             self.tangent = self.normal.cross(t.cross(self.normal)).normalized() # force orthogonal because  t is interpolated tangent , that may not perpendicular to self.normal
@@ -123,7 +121,6 @@ class BxDF:
         p = BxDF.SampleUniformDiskPolar(u)
         h = ti.sqrt(1-p[0]**2)
         p[1] = (1-(1 + wh.y) / 2) * h + (1 + wh.y) / 2 * p[1]
-        # p[1] = (1+wh.y)*0.5*(1-p[1])+h*p[1]
         pz = ti.sqrt(ti.max(0,1-p[0]**2-p[1]**2))
         nh = p[0]*t1+pz*wh+p[1]*t2
         return vec3(ax*nh[0],ti.max(EPS,nh[1]),az*nh[2]).normalized()
@@ -200,7 +197,6 @@ class BxDF:
             f   = BxDF.D(wm,ax,ay)*BxDF.G(wi,wo,ax,ay)*BxDF.Fresnel(wo, wm, ix.ray.mdm, ix.mdmT) / ti.abs(4 * BxDF.CosTheta(wi) * BxDF.CosTheta(wo))
         nextRayO,nextRayMdm = ix.pos+ix.normal*EPS, Air
         if next_ix_inside_mesh:nextRayO,nextRayMdm = ix.pos - ix.normal*EPS,   ix.mat.mdm
-        # assert nextRayMdm.eta.norm()>EPS
         return BxDF.Sample(pdf=pdf,  ray=Ray(o=nextRayO,d=BxDF.ToWorld(wi,N,T).normalized(),mdm=nextRayMdm), bxdf_value=f)
 
 class Utils:
@@ -432,13 +428,13 @@ class Film:
             window.show()
 
 Film(Scene([
-    Mesh('./assets/Cornell/quad_top.obj',       Utils.DiffuseLike(0.9,0.9,0.9)),
-    Mesh('./assets/Cornell/quad_bottom.obj',    Utils.MetalLike(Gold,0.1,0.1)),
-    Mesh('./assets/Cornell/quad_left.obj',      Utils.DiffuseLike(0.6, 0, 0)),
-    Mesh('./assets/Cornell/quad_right.obj',     Utils.DiffuseLike(0., 0.6, 0.)),
-    Mesh('./assets/Cornell/quad_back.obj',      Utils.DiffuseLike(0.9,0.9,0.9)),
-    Mesh('./assets/Cornell/bunny.obj',          Utils.DiffuseLike(0.3,0.6,0.9)),
-    Mesh('./assets/Cornell/torus.obj',          Material(type=BxDF.Type.Specular)),
-    Mesh('./assets/Cornell/sphere.obj',         Utils.GlassLike(2.)),
-    Mesh('./assets/Cornell/lightSmall.obj',     Material(albedo=vec3(50),type=ENUM_LIGHT)),
+    Mesh('./assets/quad_top.obj',       Utils.DiffuseLike(0.9,0.9,0.9)),
+    Mesh('./assets/quad_bottom.obj',    Utils.MetalLike(Gold,0.1,0.1)),
+    Mesh('./assets/quad_left.obj',      Utils.DiffuseLike(0.6, 0, 0)),
+    Mesh('./assets/quad_right.obj',     Utils.DiffuseLike(0., 0.6, 0.)),
+    Mesh('./assets/quad_back.obj',      Utils.DiffuseLike(0.9,0.9,0.9)),
+    Mesh('./assets/bunny.obj',          Utils.DiffuseLike(0.3,0.6,0.9)),
+    Mesh('./assets/torus.obj',          Material(type=BxDF.Type.Specular)),
+    Mesh('./assets/sphere.obj',         Utils.GlassLike(2.)),
+    Mesh('./assets/lightSmall.obj',     Material(albedo=vec3(50),type=ENUM_LIGHT)),
 ])).Show()
