@@ -73,8 +73,7 @@ class Interaction:
     inside_mesh:ti.u1
     mdmT:Medium
     @ti.func
-    def HasValue(self):
-        return self.fi!=INone or self.t!=NOHIT
+    def HasValue(self):return self.t!=NOHIT
     @ti.func
     def FetchInfo(self,scene):
         if self.HasValue():
@@ -95,6 +94,30 @@ class Interaction:
             self.mdmT = self.mat.mdm  # transmission medium
             if self.inside_mesh:self.mdmT = Air
         return self
+
+class PF:
+    @ti.func
+    def SampleF(ix:Interaction):
+        Wo,g = -ix.ray.d,ix.ray.mdm.g
+        #https://www.pbr-book.org/4ed/Volume_Scattering/Phase_Functions  (last eq)
+        phi = tm.pi*2*ti.random()
+        costheta = 1-2*ti.random()
+        if ti.abs(g)>EPS:  costheta = -(1+g*g-((1-g*g)/(1+g-2*g*ti.random()))**2)/(2*g)
+        sintheta = ti.sqrt(1-costheta**2)
+        wi = vec3(ti.cos(phi)*sintheta,costheta,ti.sin(phi)*sintheta)
+        Y = Wo
+        X = Y.cross(vec3(0,1,0)) if ti.abs(Y.y)<1-EPS else Y.cross(vec3(1,0,0))
+        Z = X.cross(Y)
+        Wi = X*wi.x+Y*wi.y+Z*wi.z
+        phi = ti.random() * 2 * tm.pi
+        cos_theta = ti.random() * 2 - 1
+        sin_theta = ti.sqrt(1 - cos_theta * cos_theta)
+        Wi = vec3(sin_theta * ti.sin(phi), cos_theta, sin_theta * ti.cos(phi))
+        # costheta = 1-2*ti.random()
+        # sintheta = ti.sqrt(1-costheta**2)
+        # Wi = vec3(ti.cos(phi)*sintheta,costheta,ti.sin(phi)*sintheta)
+        # infact, pdf == value == phase function.  set them to 1 is same for the  【pf/pdf * Li】
+        return Sample(pdf = 1,ray = Ray(o=ix.pos,d = Wi.normalized(),mdm=ix.ray.mdm),value =1 )
 
 class BxDF:
     class Type(enum.IntEnum):
@@ -398,6 +421,15 @@ class Scene:
                 if t0!=NOHIT: s[i+1],i = i0,i+1
                 if t1!=NOHIT: s[i+1],i = i1,i+1
         return Interaction(t,triidx,ray).FetchInfo(self)
+
+    @ti.func
+    def ScatterPoint(self,ray):
+        ret = self.HitBy(ray)
+        sigma_maj = ray.mdm.ss+ray.mdm.sa
+        # sample t ~ sigma_maj * e**(-sigma_maj * t )
+        t = -ti.log(1-ti.random())/sigma_maj
+        if t<ret.t:ret.type,ret.t,ret.fi = VOLUME,t,0  #把fi置为0去通过FectchInfo的代码。
+        return ret.FetchInfo(self)
 
     @ti.kernel
     def Draw(self):
