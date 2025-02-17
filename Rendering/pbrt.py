@@ -8,7 +8,7 @@ ti.init(arch=ti.cpu,default_fp  =ti.f64,debug=True)
 Array   = ti.types.vector( 200  ,ti.i32)
 vec3    = ti.types.vector(3,ti.f64)
 vec3i   = ti.types.vector(3, ti.i32)
-Medium   = ti.types.struct(eta=vec3,k=vec3)
+Medium   = ti.types.struct(eta=vec3,k=vec3,ss=ti.f64,g = ti.f64)
 Material = ti.types.struct( albedo=vec3,mdm=Medium,type=ti.i32,ax=ti.f64,ay=ti.f64)
 
 FURNACETEST,FLAT = False,False
@@ -19,8 +19,9 @@ MAX = 1.7976931348623157e+308
 NOHIT = MAX
 MAX3 = vec3(MAX,MAX,MAX)
 FNone,  INone,  RR,     ENUM_LIGHT = -1.0,  -1,     1.0,       0
+SURFACE,VOLUME = 0,1
 # https://refractiveindex.info/  R 630 nm ,G 532 nm ,B 465 nm
-Air,Glass,Gold = Medium(eta=vec3(1),k=vec3(0)),Medium(eta=vec3(1.5),k=vec3(0)),Medium(eta=vec3(0.18836,0.54386,1.3319),k=vec3(3.4034,2.2309,1.8693))
+Air,Glass,Gold = Medium(eta=vec3(1),k=vec3(0),ss=1.5,g=0),Medium(eta=vec3(1.5),k=vec3(0)),Medium(eta=vec3(0.18836,0.54386,1.3319),k=vec3(3.4034,2.2309,1.8693))
 
 @ti.dataclass
 class Ray:
@@ -63,6 +64,7 @@ Sample   = ti.types.struct(pdf=ti.f64, ray=Ray, value=vec3) # bxdf sample or pha
 
 @ti.dataclass
 class Interaction:
+    type:ti.i32  # 0: surface,  1: volume
     t:ti.f64
     fi:ti.i32
     ray:Ray
@@ -83,8 +85,6 @@ class Interaction:
             for i in ti.static(range(3)):
                 j,k = (i+1)%3,(i+2)%3
                 ws[i] = (self.pos-scene.vertices[face[j]]).cross(self.pos-scene.vertices[face[k]]).norm()/2/area
-            assert 0<=ws[0]<=1 and 0<=ws[1]<=1 and 0<=ws[2]<=1 and   ti.abs(ws.sum()-1)<EPS
-            # print('here')
             self.normal = (ws[0]*scene.vertex_normals[face[0]]+ws[1]*scene.vertex_normals[face[1]]+ws[2]*scene.vertex_normals[face[2]]).normalized()
             t = (ws[0]*scene.vertex_tangents[face[0]]+ws[1]*scene.vertex_tangents[face[1]]+ws[2]*scene.vertex_tangents[face[2]]).normalized()
             self.tangent = self.normal.cross(t.cross(self.normal)).normalized() # force orthogonal because  t is interpolated tangent , that may not perpendicular to self.normal
@@ -113,9 +113,6 @@ class PF:
         cos_theta = ti.random() * 2 - 1
         sin_theta = ti.sqrt(1 - cos_theta * cos_theta)
         Wi = vec3(sin_theta * ti.sin(phi), cos_theta, sin_theta * ti.cos(phi))
-        # costheta = 1-2*ti.random()
-        # sintheta = ti.sqrt(1-costheta**2)
-        # Wi = vec3(ti.cos(phi)*sintheta,costheta,ti.sin(phi)*sintheta)
         # infact, pdf == value == phase function.  set them to 1 is same for the  【pf/pdf * Li】
         return Sample(pdf = 1,ray = Ray(o=ix.pos,d = Wi.normalized(),mdm=ix.ray.mdm),value =1 )
 
@@ -383,6 +380,7 @@ class Scene:
         self.face_materials = Material.field(shape=self.fn)
         self.img = ti.Vector.field(3,ti.f64,(WIDTH,HEIGHT))
         self.camera = Camera(pos=vec3(2,0.5,0),target=(0,0.5,0))
+        self.camera = Camera(pos=vec3(1,0.5,0),target=(0,0.5,0),near_plane=0.01,fov=0.7)
         voffset,foffset = 0,0
         for mi,m in enumerate(meshes):
             if FURNACETEST and m.material.type==ENUM_LIGHT:continue
@@ -420,12 +418,12 @@ class Scene:
                 t0, t1 = ray.HitAABB(n0.min,n0.max), ray.HitAABB(n1.min,n1.max)
                 if t0!=NOHIT: s[i+1],i = i0,i+1
                 if t1!=NOHIT: s[i+1],i = i1,i+1
-        return Interaction(t,triidx,ray).FetchInfo(self)
+        return Interaction(SURFACE,t,triidx,ray).FetchInfo(self)
 
     @ti.func
     def ScatterPoint(self,ray):
         ret = self.HitBy(ray)
-        sigma_maj = ray.mdm.ss+ray.mdm.sa
+        sigma_maj = ray.mdm.ss
         # sample t ~ sigma_maj * e**(-sigma_maj * t )
         t = -ti.log(1-ti.random())/sigma_maj
         if t<ret.t:ret.type,ret.t,ret.fi = VOLUME,t,0  #把fi置为0去通过FectchInfo的代码。
@@ -437,16 +435,20 @@ class Scene:
             o = self.camera.origin + (i+ti.random()/2-1)*self.camera.unit_x + (j+ti.random()/2-1)*self.camera.unit_y
             ray = Ray(o=o,d = (o-self.camera.pos).normalized(),mdm=Air)
             ret = vec3(1)
+            sample = Sample()
             for k in range(MAXDEPTH+1):
-                ix = self.HitBy(ray)
+                ix = self.ScatterPoint(ray)
                 if ti.random() > RR or not ix.HasValue() or ix.mat.type==ENUM_LIGHT or k==MAXDEPTH:
                     if not ix.HasValue(): ret*= (vec3(0.5,0.5,0.5) if FURNACETEST else vec3(0))
                     elif ix.mat.type==ENUM_LIGHT: ret*=(ix.mat.albedo/RR)
                     else: ret*=vec3(0)
                     break
-                sample = BxDF.SampleF(ix)
+                if ix.type==VOLUME:
+                    sample = PF.SampleF(ix)
+                elif ix.type == SURFACE:
+                    sample = BxDF.SampleF(ix)
+                    ret *= sample.value*ti.abs(sample.ray.d.dot(ix.normal))/sample.pdf/RR
                 ray = sample.ray
-                ret *= sample.value*ti.abs(ray.d.dot(ix.normal))/sample.pdf/RR
             self.img[i,j] = ret
 
 class Film:
@@ -473,6 +475,6 @@ Film(Scene([
     Mesh('./assets/quad_back.obj',      Utils.DiffuseLike(0.9,0.9,0.9)),
     # Mesh('./assets/bunny.obj',          Utils.DiffuseLike(0.3,0.6,0.9)),
     # Mesh('./assets/torus.obj',          Material(type=BxDF.Type.Specular)),
-    # Mesh('./assets/sphere.obj',         Utils.GlassLike(2.)),
+    Mesh('./assets/sphere1.obj',         Utils.GlassLike(2.)),
     Mesh('./assets/lightSmall.obj',     Material(albedo=vec3(50),type=ENUM_LIGHT)),
 ])).Show()
