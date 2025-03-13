@@ -7,7 +7,7 @@ ti.init(arch=ti.cpu,default_fp  =ti.f64,debug=True)
 Array   = ti.types.vector( 200  ,ti.i32)
 vec3    = ti.types.vector(3,ti.f64)
 vec3i   = ti.types.vector(3, ti.i32)
-Medium   = ti.types.struct(eta=vec3,k=vec3)
+Medium   = ti.types.struct(eta=vec3,k=vec3,ss=ti.f64,g = ti.f64) # ss:sigma_scatter  g:  https://pbr-book.org/4ed/Volume_Scattering/Phase_Functions#TheHenyeyndashGreensteinPhaseFunction
 Material = ti.types.struct(albedo=vec3,Le = vec3,mdm=Medium,type=ti.i32,ax=ti.f64,ay=ti.f64)
 
 FLAT = False # flat shading
@@ -16,9 +16,10 @@ EPS = 1e-8
 MAX = 1.7976931348623157e+308
 NOHIT = MAX
 MAX3 = vec3(MAX,MAX,MAX)
+SURFACE,VOLUME = 0,1
 FNone,  INone,   = -1.0,  -1
 # https://refractiveindex.info/  R 630 nm ,G 532 nm ,B 465 nm
-Air,Glass,Gold = Medium(eta=vec3(1),k=vec3(0)),Medium(eta=vec3(1.5),k=vec3(0)),Medium(eta=vec3(0.18836,0.54386,1.3319),k=vec3(3.4034,2.2309,1.8693))
+Air,Glass,Gold = Medium(eta=vec3(1),k=vec3(0),ss=1.5,g=0),Medium(eta=vec3(1.5),k=vec3(0),ss=0,g=0),Medium(eta=vec3(0.18836,0.54386,1.3319),k=vec3(3.4034,2.2309,1.8693))
 MdmNone = Medium(eta=vec3(0))
 
 @ti.dataclass
@@ -57,10 +58,11 @@ class Ray:
         if t_enter<=t_exit and t_exit>=0: t = t_enter if t_enter>=0 else t_exit
         return t if isHit else NOHIT
 
-Sample   = ti.types.struct(pdf=ti.f64, ray=Ray, value=vec3) # bxdf sample or phase function sample. value is bxdf value or phase function value
+Sample  = ti.types.struct(pdf=ti.f64, ray=Ray, value=vec3) # bxdf sample or phase function sample. value is bxdf value or phase function value
 
 @ti.dataclass
 class Interaction:
+    type:ti.i32  # 0: surface,  1: volume
     t:ti.f64
     fi:ti.i32
     ray:Ray
@@ -93,6 +95,36 @@ class Interaction:
                 self.inside_mesh = False
                 if self.ray.d.dot(self.normal)>0:self.normal *= -1
         return self
+
+class PF:
+    @ti.func
+    def F(ix:Interaction,Wi):
+        Wo, g = -ix.ray.d, ix.ray.mdm.g
+        costheta = Wo.dot(Wi)
+        return (1-g*g)/(1+g*g+2*g*costheta)**1.5/4/tm.pi
+    @ti.func
+    def PDF(ix:Interaction,Wi):return PF.F(ix,Wi)
+    @ti.func
+    def Sample(ix:Interaction):
+        assert ix.type==VOLUME
+        Wo,g = -ix.ray.d,ix.ray.mdm.g
+        #https://www.pbr-book.org/4ed/Volume_Scattering/Phase_Functions  (last eq)
+        phi = tm.pi*2*ti.random()
+        costheta = 1-2*ti.random()
+        if ti.abs(g)>EPS:  costheta = -(1+g*g-((1-g*g)/(1+g-2*g*ti.random()))**2)/(2*g)
+        sintheta = ti.sqrt(1-costheta**2)
+        wi = vec3(ti.cos(phi)*sintheta,costheta,ti.sin(phi)*sintheta)
+        Y = Wo
+        X = Y.cross(vec3(0,1,0)) if ti.abs(Y.y)<1-EPS else Y.cross(vec3(1,0,0))
+        Z = X.cross(Y)
+        Wi = X*wi.x+Y*wi.y+Z*wi.z
+        # phi = ti.random() * 2 * tm.pi
+        # cos_theta = ti.random() * 2 - 1
+        # sin_theta = ti.sqrt(1 - cos_theta * cos_theta)
+        # Wi = vec3(sin_theta * ti.sin(phi), cos_theta, sin_theta * ti.cos(phi))
+        # infact, pdf == value == phase function.  set them to 1 is same for the  【pf/pdf * Li】
+        pdf = PF.F(ix,Wi)
+        return Sample(pdf = pdf ,ray = Ray(o=ix.pos,d = Wi.normalized(),mdm=ix.ray.mdm),value =pdf )
 
 class BxDF:
     class Type(enum.IntEnum):
@@ -469,7 +501,16 @@ class Scene:
                 t0, t1 = ray.HitAABB(n0.min,n0.max), ray.HitAABB(n1.min,n1.max)
                 if t0!=NOHIT: s[i+1],i = i0,i+1
                 if t1!=NOHIT: s[i+1],i = i1,i+1
-        return Interaction(t,triidx,ray).FetchInfo(self)
+        return Interaction(SURFACE,t,triidx,ray).FetchInfo(self)
+
+    @ti.func
+    def Scatter(self,ray):
+        ret = self.HitBy(ray)
+        sigma_maj = ray.mdm.ss
+        # sample t ~ sigma_maj * e**(-sigma_maj * t )
+        t = -ti.log(1-ti.random())/sigma_maj
+        if t<ret.t:ret.type,ret.t,ret.fi = VOLUME,t,0,  #把fi置为0去通过FectchInfo的代码。
+        return ret.FetchInfo(self)
 
     @ti.func
     def DirectLighting(self,ix:Interaction):
@@ -480,59 +521,58 @@ class Scene:
                 lfi = i
                 break
         ret = vec3(0)
-        # lfi = ti.random(ti.i32)%self.lfn  # prefix l means light
         lf,ln = self.lfaces[lfi],self.lface_normals[lfi]
         lpos = Mesh.SampleUniformTriangle(self.lvertices[lf[0]], self.lvertices[lf[1]], self.lvertices[lf[2]])
         wi = lpos-ix.pos
         dist = wi.norm()
         wi/=dist
-        shadowRay = Ray(o=ix.pos+ix.normal*EPS*(-1if ix.inside_mesh else 1),d=wi) # 因为光源不会出现在mesh的内部,所以这里o永远时pos+normal
+        shadowRay = Ray(o=ix.pos+ix.normal*EPS*(-1if ix.inside_mesh else 1),d=wi,mdm=Air) # 因为光源不会出现在mesh的内部,所以这里o永远时pos+normal
         intersectTest = self.HitBy(shadowRay)
         if ln.dot(wi)<0 and intersectTest.Valid() and intersectTest.fi==self.lfi2globalfi[lfi]: # 没有射到背面并且相交的是同一个三角形
-            Li = self.lface_Le[lfi]
-            # assert Li[0]==intersectTest.mat.Le[0] and Li[1]==intersectTest.mat.Le[1] and Li[2]==intersectTest.mat.Le[2]
-            bxdf_pdf,bxdf_value = BxDF.PDF_F(ix,wi)
+            Li = self.lface_Le[lfi] *ti.exp(-shadowRay.mdm.ss*dist) #Beer’s law  https://pbr-book.org/4ed/Volume_Scattering/Transmittance eq11.7
+            # print(ti.exp(-shadowRay.mdm.ss*dist))
             light_pdf_area = Li.sum()/self.ltotal_power  # (Le.sum()*A)/total_power 【PMF】 * (1/A) 【area pdf】
             light_pdf = light_pdf_area / (ti.abs(ln.dot(wi)) / dist ** 2)  # respect to solid angle
-            ret = bxdf_value*ti.abs(ix.normal.dot(wi)) * Li / light_pdf * Utils.PowerHeuristic(light_pdf,bxdf_pdf)
+            if ix.type==SURFACE:
+                bxdf_pdf,bxdf_value = BxDF.PDF_F(ix,wi)
+                # print(Utils.PowerHeuristic(light_pdf,bxdf_pdf))
+                ret = bxdf_value*ti.abs(ix.normal.dot(wi)) * Li / light_pdf * Utils.PowerHeuristic(light_pdf,bxdf_pdf)
+            elif ix.type==VOLUME:
+                pf_pdf,pf_value = PF.PDF(ix,wi),PF.F(ix,wi)
+                ret = pf_value* Li / light_pdf * Utils.PowerHeuristic(light_pdf,pf_pdf)
+            else: print('error: no such type\n')
         if  self.furnace: ret = vec3(0)
         return ret
 
-    # 注意,和上一版的Partitioning the Integrand不同。使用MIS,可以把积分域(半球)看成一个整体(而不是[光源部分]+[非光源部分])
-    # 现在对于整个积分区域,有两种采样方法，一种是光源采样，一种是bxdf采样。仔细计算好各自的weights就行
-    # 对于光源采样得到的光线，我需要知道它在bxdf采样下的pdf
-    # 同理 对于bxdf采样得到的光线，我需要知道它在光源采样下的pdf
-    # 注意的是，对于bxdf的权重，我没有在 beta *= sample.value*ti.abs(sample.ray.d.dot(ix.normal))/sample.pdf
-    #                               乘以 PowerHeuristic(bxdf_pdf,light_pdf)
-    # 因为这么做的话，需要计算这个sample在光源采样下的pdf,这又会引入一次光线场景的相交测试
-    #                不过我们不妨想一想这个光源采样的pdf是什么样子的。很明显，在和光源相交时有某个值light_pdf,和光源无交时是0
-    # 我把它放在了下一次迭代的最开始。即L += beta*ix.mat.Le*weight_bxdf。
-    # 如果这个ix是光源的话，可以很快的算出上一次sample(即本次的ray)在光源采样下的pdf
-    # 如果ix不是光源，那么上次bxdf采样不会对L有贡献，而仅对beta有影响，并且PowerHeuristic==1,完美。
     @ti.kernel
     def Draw(self):
         for i,j in self.img:
             o = self.camera.origin + (i+ti.random()/2-1)*self.camera.unit_x + (j+ti.random()/2-1)*self.camera.unit_y
             ray = Ray(o=o,d = (o-self.camera.pos).normalized(),mdm=Air)
             L,beta = vec3(0),vec3(1)
-            deltaBounce,bxdf_pdf,regularize = True,0.,False
+            deltaBounce,bxdf_pf_pdf,regularize = True,0.,False
+            sample = Sample()
             for depth in range(self.maxdepth):
-                ix = self.HitBy(ray)
+                ix = self.Scatter(ray)
                 if not ix.Valid() :
                     L += beta*self.env_Le
                     break
-                weight_bxdf = Utils.PowerHeuristic(bxdf_pdf,(ix.mat.Le.sum()/self.ltotal_power) /ti.abs(ix.normal.dot(ray.d))/(ix.pos-ray.o).norm_sqr())
-                if deltaBounce:weight_bxdf=1        # for delta bounce, bxdf_pdf is ∞
-                L += beta*ix.mat.Le*weight_bxdf     # last iteration, sample bxdf, calculate pdf in bxdf sample strategy and light sample strategy
+                # if ix.mat.Le.sum()!=0: print(Utils.PowerHeuristic(bxdf_pf_pdf,(ix.mat.Le.sum()/self.ltotal_power) /ti.abs(ix.normal.dot(ray.d))/(ix.pos-ray.o).norm_sqr()))
                 if regularize: ix.mat = BxDF.Regularize(ix.mat)  # 本次计算迭代是否考虑正则
-                L += beta*self.DirectLighting(ix)    # sample light, calculate pdf in bxdf sample strategy and light sample strategy
-                sample = BxDF.Sample(ix)
-                beta *= sample.value*ti.abs(sample.ray.d.dot(ix.normal))/sample.pdf
+                L += beta*self.DirectLighting(ix)   # sample light, calculate pdf in bxdf sample strategy and light sample strategy
+                if ix.type==SURFACE:
+                    # NOTE: sample.pdf is from last iteration. and its in beta
+                    weight_bxdf = 1 if deltaBounce else Utils.PowerHeuristic(sample.pdf,(ix.mat.Le.sum()/self.ltotal_power) /ti.abs(ix.normal.dot(ray.d))/(ix.pos-ray.o).norm_sqr())  # for delta bounce, bxdf_pdf is ∞
+                    L += beta*ix.mat.Le*weight_bxdf     # last iteration, sample bxdf, calculate pdf in bxdf sample strategy and light sample strategy
 
+                    sample = BxDF.Sample(ix)
+                    beta *= sample.value*ti.abs(sample.ray.d.dot(ix.normal))/sample.pdf
+                    deltaBounce = BxDF.Type.DeltaType(ix.mat.type)
+                    if not deltaBounce:regularize = True
+                else:
+                    sample = PF.Sample(ix)
+                    deltaBounce = False
                 ray = sample.ray
-                bxdf_pdf = sample.pdf
-                deltaBounce = BxDF.Type.DeltaType(ix.mat.type)
-                if not deltaBounce:regularize = True
             self.img[i,j] = L
 
 class Film:
@@ -564,14 +604,15 @@ def TestCase(name=''):
             Mesh('./assets/mis/plate3.obj', Utils.MetalLike(Gold, 0.05, 0.05)),
             Mesh('./assets/mis/plate4.obj', Utils.MetalLike(Gold, 0.1, 0.1)),
             Mesh('./assets/mis/floor.obj',  Utils.DiffuseLike(0.4)),
-            ],False,Camera(pos=vec3(0, 2, 15),target=(0, -2, 2.5)),11)
+            ],False,Camera(pos=vec3(0, 2, 15),target=(0, -2, 2.5)),2)
     else:  return Scene([
                     Mesh('./assets/quad_top.obj', Utils.DiffuseLike(0.9, 0.9, 0.9)),
-                    Mesh('./assets/quad_bottom.obj', Utils.MetalLike(Gold, 0.001, 0.001)),
+                    # Mesh('./assets/quad_bottom.obj', Utils.MetalLike(Gold, 0.001, 0.001)),
+                    Mesh('./assets/quad_bottom.obj', Utils.DiffuseLike(0.9)),
                     Mesh('./assets/quad_left.obj', Utils.DiffuseLike(0.6, 0, 0)),
                     Mesh('./assets/quad_right.obj', Utils.DiffuseLike(0., 0.6, 0.)),
                     Mesh('./assets/quad_back.obj', Utils.DiffuseLike(0.9, 0.9, 0.9)),
-                    # Mesh('./assets/sphere.obj', Utils.GlassLike(2.)),
+                    Mesh('./assets/sphere1.obj', Utils.GlassLike(2.)),
                     Mesh('./assets/lightSmall.obj', Utils.DiffuseLike(0.9, 0.9, 0.9, 50, 50, 50)),
-                ], False)
-Film(TestCase('MIS')).Show()
+                ], False)#, Camera(pos=vec3(1,0.5,0),target=(0,0.5,0),near_plane=0.01,fov=0.7))
+Film(TestCase('')).Show()

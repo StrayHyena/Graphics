@@ -7,18 +7,21 @@ ti.init(arch=ti.cpu,default_fp  =ti.f64,debug=True)
 Array   = ti.types.vector( 200  ,ti.i32)
 vec3    = ti.types.vector(3,ti.f64)
 vec3i   = ti.types.vector(3, ti.i32)
-Medium   = ti.types.struct(eta=vec3,k=vec3)
+# Assume there is no emitter in Medium and no absorption and scattering is constant
+Medium   = ti.types.struct(eta=vec3,k=vec3,ss=ti.f64,g = ti.f64)
 Material = ti.types.struct(albedo=vec3,Le = vec3,mdm=Medium,type=ti.i32,ax=ti.f64,ay=ti.f64)
 
 FLAT = False # flat shading
 WIDTH,HEIGHT = 400,400
+SURFACE,VOLUME = 0,1
 EPS = 1e-8
 MAX = 1.7976931348623157e+308
 NOHIT = MAX
 MAX3 = vec3(MAX,MAX,MAX)
 FNone,  INone,   = -1.0,  -1
 # https://refractiveindex.info/  R 630 nm ,G 532 nm ,B 465 nm
-Air,Glass,Gold = Medium(eta=vec3(1),k=vec3(0)),Medium(eta=vec3(1.5),k=vec3(0)),Medium(eta=vec3(0.18836,0.54386,1.3319),k=vec3(3.4034,2.2309,1.8693))
+Air,Glass,Gold = Medium(eta=vec3(1),k=vec3(0),ss=0.0,g=0),Medium(eta=vec3(1.5),k=vec3(0)),Medium(eta=vec3(0.18836,0.54386,1.3319),k=vec3(3.4034,2.2309,1.8693))
+Jade,Jade1 = Medium(eta=vec3(1.1),k=vec3(0),ss=1.5,g=0.9),Medium(eta=vec3(1.1),k=vec3(0),ss=1.5,g=-0.9),
 MdmNone = Medium(eta=vec3(0))
 
 @ti.dataclass
@@ -30,6 +33,7 @@ class Ray:
     @ti.func
     def At(self, t):
         return self.o+self.d*t
+
     @ti.func
     def HitTriangle(self,v0,v1,v2):
         ret = NOHIT
@@ -61,6 +65,7 @@ Sample   = ti.types.struct(pdf=ti.f64, ray=Ray, value=vec3) # bxdf sample or pha
 
 @ti.dataclass
 class Interaction:
+    type:ti.i32  # 0: surface,  1: volume
     t:ti.f64
     fi:ti.i32
     ray:Ray
@@ -86,13 +91,42 @@ class Interaction:
             self.tangent = self.normal.cross(t.cross(self.normal)).normalized() # force orthogonal because  t is interpolated tangent , that may not perpendicular to self.normal
             if FLAT: self.normal,self.tangent = scene.face_normals[self.fi],scene.face_tangents[self.fi]
             self.mat = scene.face_materials[self.fi]
-            self.inside_mesh = False if (self.ray.mdm.eta - Air.eta).norm()==0 else True  #注意，不能用法线判断。因为如果不是平坦着色，插值结果可能不对
+            self.inside_mesh = False if (self.ray.mdm.eta - Air.eta).norm()==0 else True  #注意，不能用法线判断。因为如果不是平坦着色，插值结果可能不对。当然，这么做的前提是每次生成光线时的mdm要给的是对的
             self.mdmT = self.mat.mdm  # transmission medium
             if self.inside_mesh:self.mdmT = Air
             if scene.face_doubleside[self.fi]:
                 self.inside_mesh = False
-                if self.ray.d.dot(self.normal)>0:self.normal *= -1
+                if self.ray.d.dot(self.normal)>0:self.normal *= -1  #对于双面的面片，法线总是朝向光线的起点。
         return self
+class PF:
+    @ti.func
+    def F(ix:Interaction,Wi):
+        Wo, g = -ix.ray.d, ix.ray.mdm.g
+        costheta = Wo.dot(Wi)
+        return (1-g*g)/(1+g*g+2*g*costheta)**1.5/4/tm.pi
+    @ti.func
+    def PDF(ix:Interaction,Wi):return PF.F(ix,Wi)
+    @ti.func
+    def Sample(ix:Interaction):
+        assert ix.type==VOLUME
+        Wo,g = -ix.ray.d,ix.ray.mdm.g
+        #https://www.pbr-book.org/4ed/Volume_Scattering/Phase_Functions  (last eq)
+        phi = tm.pi*2*ti.random()
+        costheta = 1-2*ti.random()
+        if ti.abs(g)>EPS:  costheta = -(1+g*g-((1-g*g)/(1+g-2*g*ti.random()))**2)/(2*g)
+        sintheta = ti.sqrt(1-costheta**2)
+        wi = vec3(ti.cos(phi)*sintheta,costheta,ti.sin(phi)*sintheta)
+        Y = Wo
+        X = Y.cross(vec3(0,1,0)) if ti.abs(Y.y)<1-EPS else Y.cross(vec3(1,0,0))
+        Z = X.cross(Y)
+        Wi = X*wi.x+Y*wi.y+Z*wi.z
+        # phi = ti.random() * 2 * tm.pi
+        # cos_theta = ti.random() * 2 - 1
+        # sin_theta = ti.sqrt(1 - cos_theta * cos_theta)
+        # Wi = vec3(sin_theta * ti.sin(phi), cos_theta, sin_theta * ti.cos(phi))
+        # infact, pdf == value == phase function.  set them to 1 is same for the  【pf/pdf * Li】
+        pdf = PF.F(ix,Wi)
+        return Sample(pdf = pdf ,ray = Ray(o=ix.pos,d = Wi.normalized(),mdm=ix.ray.mdm),value =pdf )
 
 class BxDF:
     class Type(enum.IntEnum):
@@ -100,11 +134,6 @@ class BxDF:
         Specular = enum.auto()   # reflection_specular
         Transmission = enum.auto() # reflection_specular  transmission_specular
         Microfacet  = enum.auto()  # reflection_glossy
-        @ti.func
-        def DeltaType(t):
-            ret  = False
-            if t==BxDF.Type.Specular or t==BxDF.Type.Transmission:ret = True
-            return ret
     Sample = ti.types.struct(pdf=ti.f64,ray=Ray,value=vec3)
     @ti.func
     def CosTheta(w):return w.y
@@ -177,7 +206,7 @@ class BxDF:
     def D_PDF(w,wm,ax,ay):return BxDF.G1(w,ax,ay)/ti.abs(BxDF.CosTheta(w))*BxDF.D(wm,ax,ay)*ti.abs(w.dot(wm))
     @ti.func
     def Sample(ix:Interaction):
-        assert ix.ray.mdm.eta.sum()!=0
+        assert ix.ray.mdm.eta.sum() != 0
         N,T,n = ix.normal,ix.tangent,vec3(0,1,0)  # N: world normal, T: world tangent, n: local normal
         wo,wi,pdf,f = BxDF.ToLocal(-ix.ray.d,N,T).normalized(),vec3(0),0.,vec3(MAX,0,0) # use MAX RED to expose problem
         next_ix_inside_mesh = ix.inside_mesh # next intersection inside mesh : default is same with current
@@ -192,13 +221,10 @@ class BxDF:
             cosI,eta = wo.dot(n), ix.mdmT.eta/ix.ray.mdm.eta
             if cosI<0:cosI,n = -cosI,-n
             wi =  (-wo/eta + (cosI/eta - ti.sqrt(1 - (1/eta)**2 * (1 -cosI**2))) * n).normalized()
-            R = BxDF.Fresnel(wo, n, ix.ray.mdm, ix.mdmT)[0]
-            if ti.random() < R:  # for Dielectric to Dielectric fresnel's rgb are identical
-                wi = BxDF.Reflect(wo, n)
-                pdf, f = R, vec3(R) / ti.abs(BxDF.CosTheta(wi))
-            else:
-                next_ix_inside_mesh = not next_ix_inside_mesh  # refraction happens: mesh to air or air to mesh
-                pdf, f = 1 - R, vec3(1 - R) / ti.abs(BxDF.CosTheta(wi))
+            if ti.random()<BxDF.Fresnel(wo,n,ix.ray.mdm,ix.mdmT)[0]: # for Dielectric to Dielectric fresnel's rgb are identical
+                wi = BxDF.Reflect(wo,n)
+            else: next_ix_inside_mesh = not next_ix_inside_mesh # refraction happens: mesh to air or air to mesh
+            pdf,f = 1,vec3(1)/ti.abs(BxDF.CosTheta(wi))
         elif ix.mat.type==BxDF.Type.Microfacet:
             ax,ay = ix.mat.ax,ix.mat.ay
             wm = BxDF.Sample_wm(wo,[ti.random(),ti.random()],ax,ay)
@@ -210,26 +236,6 @@ class BxDF:
         if next_ix_inside_mesh:nextRayO,nextRayMdm = ix.pos - ix.normal*EPS,   ix.mat.mdm
         # assert nextRayMdm.eta.norm()>EPS
         return Sample(pdf=pdf,  ray=Ray(o=nextRayO,d=BxDF.ToWorld(wi,N,T).normalized(),mdm=nextRayMdm), value=f)
-    @ti.func
-    def PDF_F(ix:Interaction,wi):  # bxdf value
-        assert ix.ray.mdm.eta.sum()!=0
-        N, T, n = ix.normal, ix.tangent, vec3(0, 1, 0)  # N: world normal, T: world tangent, n: local normal
-        wo, wi,pdf,f = BxDF.ToLocal(-ix.ray.d, N, T).normalized(), BxDF.ToLocal(wi, N, T).normalized(),0.0,vec3(MAX,0,0)
-        next_ix_inside_mesh = ix.inside_mesh  # next intersection inside mesh : default is same with current
-        if ix.mat.type == BxDF.Type.Lambertian:f,pdf = ix.mat.albedo / tm.pi,wi.y/tm.pi
-        elif ix.mat.type == BxDF.Type.Specular: f,pdf = vec3(0),0.0
-        elif ix.mat.type == BxDF.Type.Transmission: f,pdf = vec3(0),0.0
-        elif ix.mat.type == BxDF.Type.Microfacet:
-            ax,ay,wm = ix.mat.ax, ix.mat.ay,(wo+wi).normalized()
-            pdf = BxDF.D_PDF(wo, wm, ax, ay) / 4.0 / ti.abs(wo.dot(wm))
-            f = BxDF.D(wm, ax, ay) * BxDF.G(wi, wo, ax, ay) * BxDF.Fresnel(wo, wm, ix.ray.mdm, ix.mdmT) / ti.abs(4 * BxDF.CosTheta(wi) * BxDF.CosTheta(wo))
-        return pdf,f
-    @ti.func
-    def Regularize(mat:Material):
-        if mat.type==BxDF.Type.Microfacet:
-            if mat.ax < 0.3: mat.ax = tm.clamp(mat.ax * 2, 0.1, 0.3)
-            if mat.ay < 0.3: mat.ay = tm.clamp(mat.ay * 2, 0.1, 0.3)
-        return mat
 
 class Utils:
     @staticmethod
@@ -243,8 +249,6 @@ class Utils:
     def GlassLike(eta): return Material(Le=vec3(0),mdm=Medium(eta = vec3(eta)),type=BxDF.Type.Transmission)
     @staticmethod
     def MirrorLike():return Material(Le=vec3(0),mdm = MdmNone,type=BxDF.Type.Specular)
-    @ti.func
-    def PowerHeuristic(pa,pb): return pa**2/(pa**2+pb**2)
 
 class Mesh(trimesh.Trimesh):
     def __init__(self,objpath,material):
@@ -275,17 +279,6 @@ class Mesh(trimesh.Trimesh):
         for fi,face in enumerate(self.faces):
             for vi in face: vt[vi]+=ft[fi]*self.area_faces[fi]
         for vi in range(self.vertices.shape[0]):self.vertex_tangents[vi] = vt[vi]/np.linalg.norm(vt[vi])
-
-    @ti.func
-    def SampleUniformTriangle(v0,v1,v2):
-        u,b0,b1 = (ti.random(),ti.random()),-1.0,-1.0
-        if u[0] < u[1] :
-            b0 = u[0] / 2
-            b1 = u[1] - b0
-        else :
-            b1 = u[1] / 2
-            b0 = u[0] - b1
-        return b0*v0 + b1*v1 + (1-b0-b1)*v2
 
 class Camera:
     def __init__(self,pos,target,near_plane=0.01,fov = 0.35):
@@ -391,9 +384,9 @@ class BVH:
 
 @ti.data_oriented
 class Scene:
-    def __init__(self,meshes,furnace_test=False,camera = Camera(pos=vec3(2,0.5,0),target=(0,0.5,0)),maxDepth=11):
+    def __init__(self,meshes,furnace_test=False,camera = Camera(pos=vec3(2,0.5,0),target=(0,0.5,0))):
+        self.furnace,self.maxdepth = furnace_test,11 if not furnace_test else 100
         self.env_Le = vec3(0.5) if furnace_test else vec3(0)
-        self.furnace,self.maxdepth = furnace_test,maxDepth if not furnace_test else 100
         self.vn = sum([len(m.vertices) for m in meshes])
         self.fn = sum([len(m.faces) for m in meshes])
         self.vertices = ti.Vector.field(3,ti.f64,self.vn)
@@ -407,46 +400,22 @@ class Scene:
         self.face_doubleside  = ti.field(ti.u1,shape=self.fn)
         self.img = ti.Vector.field(3,ti.f64,(WIDTH,HEIGHT))
         self.camera = camera
-
-        # lights geometry
-        self.lvn = sum([len(m.vertices) for m in meshes if m.material.Le.norm()>0])
-        self.lfn = sum([len(m.faces) for m in meshes if m.material.Le.norm()>0])
-        self.lvertices     = ti.Vector.field(3,ti.f64,self.lvn)
-        self.lfaces         = ti.Vector.field(3,ti.i32,self.lfn)
-        self.lface_normals = ti.Vector.field(3,ti.f64,self.lfn)
-        self.lface_Le      = ti.Vector.field(3,ti.f64,self.lfn)
-        self.lCMF          = ti.field(ti.f32,self.lfn)
-        self.lfi2globalfi  = ti.field(ti.i32,self.lfn) # 这个值记录着，light face idx 到上面的所有的face idx的映射 (self.lfaces -> self.face)
-        self.ltotal_power = sum([m.area*m.material.Le.sum() for m in meshes])
         voffset,foffset = 0,0
-        lvoffset,lfoffset = 0,0
-        light_CMF = 0
         for mi,m in enumerate(meshes):
-            isLight = m.material.Le.norm()>0
-            if self.furnace:m.material.albedo,m.material.Le= vec3(1),vec3(0)
+            if self.furnace:m.material.albedo,m.material.Le = vec3(1),vec3(0)
             for vi,v in enumerate(m.vertices):
                 self.vertices[voffset+vi] = m.vertices[vi]
                 self.vertex_normals[voffset + vi] = m.vertex_normals[vi]
                 self.vertex_tangents[voffset + vi] = m.vertex_tangents[vi]
-                if isLight:self.lvertices[lvoffset+vi] = m.vertices[vi]
             for fi,f in enumerate(m.faces):
                 self.faces[foffset+fi] = f+voffset
                 self.face_areas[foffset+fi] = m.area_faces[fi]
                 self.face_normals[foffset+fi] = m.face_normals[fi]
                 self.face_tangents[foffset+fi] = m.face_tangents[fi]
                 self.face_materials[foffset+fi] = m.material
-                self.face_doubleside[foffset+fi] = not m.is_watertight
-                if isLight:
-                    self.lfaces[lfoffset+fi]        = f+lvoffset
-                    self.lface_normals[lfoffset+fi] = m.face_normals[fi]
-                    self.lface_Le[lfoffset+fi]      = m.material.Le
-                    light_CMF += m.material.Le.sum()*m.area_faces[fi]
-                    self.lCMF[lfoffset+fi] = light_CMF/self.ltotal_power
-                    self.lfi2globalfi[lfoffset+fi]  = foffset+fi
+                self.face_doubleside[foffset + fi] = not m.is_watertight
             voffset += len(m.vertices)
             foffset += len(m.faces)
-            lvoffset += (len(m.vertices) if isLight else 0)
-            lfoffset += (len(m.faces) if isLight else 0)
         self.bvh = BVH(self.vertices.to_numpy(),self.faces.to_numpy())
 
     @ti.func
@@ -469,70 +438,38 @@ class Scene:
                 t0, t1 = ray.HitAABB(n0.min,n0.max), ray.HitAABB(n1.min,n1.max)
                 if t0!=NOHIT: s[i+1],i = i0,i+1
                 if t1!=NOHIT: s[i+1],i = i1,i+1
-        return Interaction(t,triidx,ray).FetchInfo(self)
+        return Interaction(SURFACE,t,triidx,ray).FetchInfo(self)
 
     @ti.func
-    def DirectLighting(self,ix:Interaction):
-        # sample a area light according to Light Power
-        lfi,rand = INone,ti.random()
-        for i in range(self.lfn):
-            if rand < self.lCMF[i]:
-                lfi = i
-                break
-        ret = vec3(0)
-        # lfi = ti.random(ti.i32)%self.lfn  # prefix l means light
-        lf,ln = self.lfaces[lfi],self.lface_normals[lfi]
-        lpos = Mesh.SampleUniformTriangle(self.lvertices[lf[0]], self.lvertices[lf[1]], self.lvertices[lf[2]])
-        wi = lpos-ix.pos
-        dist = wi.norm()
-        wi/=dist
-        shadowRay = Ray(o=ix.pos+ix.normal*EPS*(-1if ix.inside_mesh else 1),d=wi) # 因为光源不会出现在mesh的内部,所以这里o永远时pos+normal
-        intersectTest = self.HitBy(shadowRay)
-        if ln.dot(wi)<0 and intersectTest.Valid() and intersectTest.fi==self.lfi2globalfi[lfi]: # 没有射到背面并且相交的是同一个三角形
-            Li = self.lface_Le[lfi]
-            # assert Li[0]==intersectTest.mat.Le[0] and Li[1]==intersectTest.mat.Le[1] and Li[2]==intersectTest.mat.Le[2]
-            bxdf_pdf,bxdf_value = BxDF.PDF_F(ix,wi)
-            light_pdf_area = Li.sum()/self.ltotal_power  # (Le.sum()*A)/total_power 【PMF】 * (1/A) 【area pdf】
-            light_pdf = light_pdf_area / (ti.abs(ln.dot(wi)) / dist ** 2)  # respect to solid angle
-            ret = bxdf_value*ti.abs(ix.normal.dot(wi)) * Li / light_pdf * Utils.PowerHeuristic(light_pdf,bxdf_pdf)
-        if  self.furnace: ret = vec3(0)
-        return ret
+    def Scatter(self, ray):
+        ret = self.HitBy(ray)
+        sigma_maj = ray.mdm.ss
+        # sample t ~ sigma_maj * e**(-sigma_maj * t )
+        t = -ti.log(1 - ti.random()) / sigma_maj
+        if t < ret.t: ret.type, ret.t, ret.fi = VOLUME, t, 0  # 把fi置为0去通过FectchInfo的代码。
+        return ret.FetchInfo(self)
 
-    # 注意,和上一版的Partitioning the Integrand不同。使用MIS,可以把积分域(半球)看成一个整体(而不是[光源部分]+[非光源部分])
-    # 现在对于整个积分区域,有两种采样方法，一种是光源采样，一种是bxdf采样。仔细计算好各自的weights就行
-    # 对于光源采样得到的光线，我需要知道它在bxdf采样下的pdf
-    # 同理 对于bxdf采样得到的光线，我需要知道它在光源采样下的pdf
-    # 注意的是，对于bxdf的权重，我没有在 beta *= sample.value*ti.abs(sample.ray.d.dot(ix.normal))/sample.pdf
-    #                               乘以 PowerHeuristic(bxdf_pdf,light_pdf)
-    # 因为这么做的话，需要计算这个sample在光源采样下的pdf,这又会引入一次光线场景的相交测试
-    #                不过我们不妨想一想这个光源采样的pdf是什么样子的。很明显，在和光源相交时有某个值light_pdf,和光源无交时是0
-    # 我把它放在了下一次迭代的最开始。即L += beta*ix.mat.Le*weight_bxdf。
-    # 如果这个ix是光源的话，可以很快的算出上一次sample(即本次的ray)在光源采样下的pdf
-    # 如果ix不是光源，那么上次bxdf采样不会对L有贡献，而仅对beta有影响，并且PowerHeuristic==1,完美。
     @ti.kernel
     def Draw(self):
         for i,j in self.img:
             o = self.camera.origin + (i+ti.random()/2-1)*self.camera.unit_x + (j+ti.random()/2-1)*self.camera.unit_y
             ray = Ray(o=o,d = (o-self.camera.pos).normalized(),mdm=Air)
+            #https://pbr-book.org/4ed/Light_Transport_I_Surface_Reflection/The_Light_Transport_Equation eq13.4  可以参考13.1.2举的例子, Le + rho_hh( Le + rho_hh( Le +...
             L,beta = vec3(0),vec3(1)
-            deltaBounce,bxdf_pdf,regularize = True,0.,False
-            for depth in range(self.maxdepth):
-                ix = self.HitBy(ray)
+            for _ in range(self.maxdepth):
+                ix = self.Scatter(ray)
                 if not ix.Valid() :
                     L += beta*self.env_Le
                     break
-                weight_bxdf = Utils.PowerHeuristic(bxdf_pdf,(ix.mat.Le.sum()/self.ltotal_power) /ti.abs(ix.normal.dot(ray.d))/(ix.pos-ray.o).norm_sqr())
-                if deltaBounce:weight_bxdf=1        # for delta bounce, bxdf_pdf is ∞
-                L += beta*ix.mat.Le*weight_bxdf     # last iteration, sample bxdf, calculate pdf in bxdf sample strategy and light sample strategy
-                if regularize: ix.mat = BxDF.Regularize(ix.mat)  # 本次计算迭代是否考虑正则
-                L += beta*self.DirectLighting(ix)    # sample light, calculate pdf in bxdf sample strategy and light sample strategy
-                sample = BxDF.Sample(ix)
-                beta *= sample.value*ti.abs(sample.ray.d.dot(ix.normal))/sample.pdf
-
-                ray = sample.ray
-                bxdf_pdf = sample.pdf
-                deltaBounce = BxDF.Type.DeltaType(ix.mat.type)
-                if not deltaBounce:regularize = True
+                if ix.type==SURFACE:
+                    L += beta* ix.mat.Le
+                    sample = BxDF.Sample(ix)
+                    beta *= sample.value*ti.abs(sample.ray.d.dot(ix.normal))/sample.pdf
+                    ray = sample.ray
+                else:
+                    sample = PF.Sample(ix)
+                    beta *= sample.value/sample.pdf
+                    ray = sample.ray
             self.img[i,j] = L
 
 class Film:
@@ -564,14 +501,33 @@ def TestCase(name=''):
             Mesh('./assets/mis/plate3.obj', Utils.MetalLike(Gold, 0.05, 0.05)),
             Mesh('./assets/mis/plate4.obj', Utils.MetalLike(Gold, 0.1, 0.1)),
             Mesh('./assets/mis/floor.obj',  Utils.DiffuseLike(0.4)),
-            ],False,Camera(pos=vec3(0, 2, 15),target=(0, -2, 2.5)),11)
-    else:  return Scene([
+            ],False,Camera(pos=vec3(0, 2, 15),target=(0, -2, 2.5)))
+    if name=='Cornell': return Scene([
+            Mesh('./assets/quad_top.obj',       Utils.DiffuseLike(0.9,0.9,0.9)),
+            Mesh('./assets/quad_bottom.obj',    Utils.MetalLike(Gold,0.1,0.1)),
+            Mesh('./assets/quad_left.obj',      Utils.DiffuseLike(0.6, 0, 0)),
+            Mesh('./assets/quad_right.obj',     Utils.DiffuseLike(0., 0.6, 0.)),
+            Mesh('./assets/quad_back.obj',      Utils.DiffuseLike(0.9,0.9,0.9)),
+            Mesh('./assets/sphere.obj',         Utils.GlassLike(2.)),
+            Mesh('./assets/bunny.obj',          Utils.DiffuseLike(0.3,0.6,0.9)),
+            Mesh('./assets/torus.obj',          Material(type=BxDF.Type.Specular)),
+            Mesh('./assets/lightSmall.obj',     Utils.DiffuseLike(0.9,0.9,0.9,50,50,50)),
+        ],False)
+    if name=='Volume':return Scene([
+                    Mesh('./assets/medium/floor.obj', Utils.DiffuseLike(0.3, 0.6, 0.9)),
+                    Mesh('./assets/medium/light.obj', Utils.DiffuseLike(0.9, 0.9, 0.9, 1, 1, 1)),
+                    Mesh('./assets/medium/bunny.obj', Material(Le=vec3(0),mdm=Jade,type=BxDF.Type.Transmission)),
+                    Mesh('./assets/medium/bunny1.obj', Material(Le=vec3(0), mdm=Jade1, type=BxDF.Type.Transmission)),
+                ], False,Camera(pos=vec3(0, 2, 15),target=(0, -2, 2.5)))
+    else: return Scene([
                     Mesh('./assets/quad_top.obj', Utils.DiffuseLike(0.9, 0.9, 0.9)),
-                    Mesh('./assets/quad_bottom.obj', Utils.MetalLike(Gold, 0.001, 0.001)),
+                    # Mesh('./assets/quad_bottom.obj', Utils.MetalLike(Gold, 0.001, 0.001)),
+                    Mesh('./assets/quad_bottom.obj', Utils.DiffuseLike(0.9)),
                     Mesh('./assets/quad_left.obj', Utils.DiffuseLike(0.6, 0, 0)),
                     Mesh('./assets/quad_right.obj', Utils.DiffuseLike(0., 0.6, 0.)),
                     Mesh('./assets/quad_back.obj', Utils.DiffuseLike(0.9, 0.9, 0.9)),
-                    # Mesh('./assets/sphere.obj', Utils.GlassLike(2.)),
-                    Mesh('./assets/lightSmall.obj', Utils.DiffuseLike(0.9, 0.9, 0.9, 50, 50, 50)),
-                ], False)
-Film(TestCase('MIS')).Show()
+                    Mesh('./assets/sphere1.obj', Utils.GlassLike(2.)),
+                    Mesh('./assets/lightSmall.obj', Utils.DiffuseLike(0.9, 0.9, 0.9, 100, 100, 100)),
+                ], False)#, Camera(pos=vec3(1,0.5,0),target=(0,0.5,0),near_plane=0.01,fov=0.7))
+
+Film(TestCase('Volume')).Show()
