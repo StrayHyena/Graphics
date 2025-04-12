@@ -118,10 +118,6 @@ class PF:
         X = Y.cross(vec3(0,1,0)) if ti.abs(Y.y)<1-EPS else Y.cross(vec3(1,0,0))
         Z = X.cross(Y)
         Wi = X*wi.x+Y*wi.y+Z*wi.z
-        # phi = ti.random() * 2 * tm.pi
-        # cos_theta = ti.random() * 2 - 1
-        # sin_theta = ti.sqrt(1 - cos_theta * cos_theta)
-        # Wi = vec3(sin_theta * ti.sin(phi), cos_theta, sin_theta * ti.cos(phi))
         # infact, pdf == value == phase function.  set them to 1 is same for the  【pf/pdf * Li】
         pdf = PF.F(ix,Wi)
         return Sample(pdf = pdf ,ray = Ray(o=ix.pos,d = Wi.normalized(),mdm=ix.ray.mdm),value =pdf )
