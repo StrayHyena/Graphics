@@ -456,24 +456,24 @@ def TestCase(name=''):
             Mesh('./assets/mis/floor.obj',  Utils.DiffuseLike(0.4)),
             ],False,Camera(pos=vec3(0, 2, 15),target=(0, -2, 2.5)))
     if name=='Cornell': return Scene([
-            Mesh('./assets/quad_top.obj',       Utils.DiffuseLike(0.9,0.9,0.9)),
-            Mesh('./assets/quad_bottom.obj',    Utils.MetalLike(Gold,0.1,0.1)),
-            Mesh('./assets/quad_left.obj',      Utils.DiffuseLike(0.6, 0, 0)),
-            Mesh('./assets/quad_right.obj',     Utils.DiffuseLike(0., 0.6, 0.)),
-            Mesh('./assets/quad_back.obj',      Utils.DiffuseLike(0.9,0.9,0.9)),
-            Mesh('./assets/sphere.obj',         Utils.GlassLike(2.)),
-            Mesh('./assets/bunny.obj',          Utils.DiffuseLike(0.3,0.6,0.9)),
-            Mesh('./assets/torus.obj',          Material(type=BxDF.Type.Specular)),
-            Mesh('./assets/lightSmall.obj',     Utils.DiffuseLike(0.9,0.9,0.9,50,50,50)),
+            Mesh('./assets/cornell/quad_top.obj',       Utils.DiffuseLike(0.9,0.9,0.9)),
+            Mesh('./assets/cornell/quad_bottom.obj',    Utils.MetalLike(Gold,0.1,0.1)),
+            Mesh('./assets/cornell/quad_left.obj',      Utils.DiffuseLike(0.6, 0, 0)),
+            Mesh('./assets/cornell/quad_right.obj',     Utils.DiffuseLike(0., 0.6, 0.)),
+            Mesh('./assets/cornell/quad_back.obj',      Utils.DiffuseLike(0.9,0.9,0.9)),
+            Mesh('./assets/cornell/sphere.obj',         Utils.GlassLike(2.)),
+            Mesh('./assets/cornell/bunny.obj',          Utils.DiffuseLike(0.3,0.6,0.9)),
+            Mesh('./assets/cornell/torus.obj',          Material(type=BxDF.Type.Specular)),
+            Mesh('./assets/cornell/lightSmall.obj',     Utils.DiffuseLike(0.9,0.9,0.9,50,50,50)),
         ],False)
     else: return Scene([
-                    Mesh('./assets/quad_top.obj', Utils.DiffuseLike(0.9, 0.9, 0.9)),
-                    Mesh('./assets/quad_bottom.obj', Utils.MetalLike(Gold, 0.001, 0.001)),
-                    Mesh('./assets/quad_left.obj', Utils.DiffuseLike(0.6, 0, 0)),
-                    Mesh('./assets/quad_right.obj', Utils.DiffuseLike(0., 0.6, 0.)),
-                    Mesh('./assets/quad_back.obj', Utils.DiffuseLike(0.9, 0.9, 0.9)),
-                    # Mesh('./assets/sphere.obj', Utils.GlassLike(2.)),
-                    Mesh('./assets/lightSmall.obj', Utils.DiffuseLike(0.9, 0.9, 0.9, 50, 50, 50)),
+                    Mesh('./assets/cornell/quad_top.obj', Utils.DiffuseLike(0.9, 0.9, 0.9)),
+                    Mesh('./assets/cornell/quad_bottom.obj', Utils.MetalLike(Gold, 0.001, 0.001)),
+                    Mesh('./assets/cornell/quad_left.obj', Utils.DiffuseLike(0.6, 0, 0)),
+                    Mesh('./assets/cornell/quad_right.obj', Utils.DiffuseLike(0., 0.6, 0.)),
+                    Mesh('./assets/cornell/quad_back.obj', Utils.DiffuseLike(0.9, 0.9, 0.9)),
+                    # Mesh('./assetcornell/s/sphere.obj', Utils.GlassLike(2.)),
+                    Mesh('./assets/cornell/lightSmall.obj', Utils.DiffuseLike(0.9, 0.9, 0.9, 50, 50, 50)),
                 ], False)
 
-Film(TestCase('MIS')).Show()
+Film(TestCase('Cornell')).Show()

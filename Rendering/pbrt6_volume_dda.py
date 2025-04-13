@@ -50,9 +50,9 @@ class Interaction:
     mp:MediumPointProperties
 
     @ti.func
-    def FetchInfo(self, volume):
+    def FetchInfo(self, volume,lambdas):
         self.pos = self.ray.At(self.t)
-        self.mp = volume.SamplePoint(self.pos)
+        self.mp = volume.SamplePoint(self.pos,lambdas)
         return self
 
 class PF:
@@ -203,7 +203,6 @@ class DDAIter:
     prev:vec3i
     res:vec3i
     curr_t:ti.f64
-    prev_t:ti.f64
     base_t:ti.f64
 
     @ti.func
@@ -229,13 +228,11 @@ class DDAIter:
     @ti.func
     def Next(self):
         self.prev = self.curr
-        self.prev_t = self.curr_t
         i = 0 if self.t[0] < self.t[1] else 1
         if self.t[i]>self.t[2]: i = 2
         self.curr_t = self.t[i]
         self.t[i]    += self.d[i]
         self.curr[i] += int(tm.sign(self.dir[i]))
-        # print(self.prev,self.curr)
         return self
 
     @ti.func
@@ -273,14 +270,14 @@ class Volume:
 
     @ti.func
     def VisibleWavelengthsPDF(l:vec3):
-        ret =  0.0039398042 * (1-tm.tanh(0.0072 * (l - 538)))
+        ret =  0.0039398042 * (1-tm.tanh(0.0072 * (l - 538))**2)
         for i in ti.static(range(3)):
             if l[i]<360 or l[i]>830:ret[i] = 0
         return ret
 
     @ti.func
-    def SampleVisibleWavelengths(u:vec3) :
-        x = 0.85691062 - 1.82750197 * u
+    def SampleVisibleWavelengths() :
+        x = 0.85691062 - 1.82750197 * vec3(ti.random(),ti.random(),ti.random())
         return 538 - 138.888889 * 0.5*tm.log((1+x)/(1-x))
 
     @ti.func
@@ -303,33 +300,24 @@ class Volume:
         return ret
 
     @ti.func
-    def SamplePoint(self,pos):
+    def SamplePoint(self,pos,lambdas):
         Le = vec3(0)
         d = self.rho.At(pos)
         T = self.T.At(pos)*self.TScale
         # black body emitter
         lambdaMax = 2.8977721e-3 / T
         normalizationFactor = 1 / Volume.Blackbody(vec3(lambdaMax) * 1e9, T)
-        u = vec3(ti.random(),ti.random(),ti.random())
-        lambdas = Volume.SampleVisibleWavelengths(u)
-        lpdfs   = Volume.VisibleWavelengthsPDF(lambdas)
         Le = Volume.Blackbody(lambdas, T) * normalizationFactor
-        # convert SampledSpetrum的功率谱到RGB的功率谱
-        LeRGB,Le = vec3(0),Le/lpdfs
-        for i in ti.static(range(3)):
-            for j in ti.static(range(3)):
-                LeRGB[i] += CIE[i,int(lambdas[j])-360]*Le[j]/3
-        return MediumPointProperties(sa=d*self.saScale,ss=d*self.ssScale,g=self.g,Le=LeRGB*self.LeScale)
+        return MediumPointProperties(sa=d*self.saScale,ss=d*self.ssScale,g=self.g,Le=Le*self.LeScale)
 
     @ti.kernel
     def Draw(self):
         for i,j in self.img:
             o = self.camera.origin + (i+ti.random()/2-1)*self.camera.unit_x + (j+ti.random()/2-1)*self.camera.unit_y
             ray = Ray(o=o,d = (o-self.camera.pos).normalized())
-            L, terminate,depth = vec3(0),  False,0
+            L, terminate,depth,lambdas = vec3(0),  False,0,Volume.SampleVisibleWavelengths()
             while depth < self.maxdepth and not terminate :
-                ddaiter = DDAIter(t=MAX3, d=MAX3, dir=ray.d, curr=vec3i(-1), prev=vec3i(-1), res=self.rho.majres, curr_t=0,
-                                  prev_t=0, base_t=MAX).Init(self.bmin, self.bmax, self.rho.majres, ray)
+                ddaiter = DDAIter(t=MAX3, d=MAX3, dir=ray.d, curr=vec3i(-1), prev=vec3i(-1), res=self.rho.majres, curr_t=0, base_t=MAX).Init(self.bmin, self.bmax, self.rho.majres, ray)
                 rayt, u = ddaiter.base_t, 2  # base_t是光线起点到box第一个交点的t. prev_t是p0(base_t)到前一个voxel的t
                 while u == 2:
                     if ddaiter.Next().IsPrevExceed(): break
@@ -340,7 +328,7 @@ class Volume:
                         if rayt > ddaiter.base_t + ddaiter.curr_t:
                             rayt = ddaiter.base_t + ddaiter.curr_t
                             break
-                        ix = Interaction(rayt, ray).FetchInfo(self)
+                        ix = Interaction(rayt, ray).FetchInfo(self,lambdas)
                         u = self.SampleSaSsSn(ix.mp.sa / maj, ix.mp.ss / maj)
                         if u == 0:
                             L += ix.mp.Le
@@ -352,7 +340,12 @@ class Volume:
                             depth += 1
                             break
                 if ddaiter.IsPrevExceed() and u == 2: break  # 射出maj grid
-            self.img[i,j] = L
+            lambdas_pdf = Volume.VisibleWavelengthsPDF(lambdas)
+            LeRGB, Le = vec3(0), L / lambdas_pdf
+            for i in ti.static(range(3)):
+                for j in ti.static(range(3)):
+                    LeRGB[i] += CIE[i, int(lambdas[j]) - 360] * Le[j] / 3
+            self.img[i, j] = ti.Matrix([[3.2406,-1.5372, -0.4986],[-0.9689,1.8758,0.0415],[0.0557,-0.2040,1.057]])@LeRGB
 
 
 class Film:
@@ -371,4 +364,4 @@ class Film:
             canvas.set_image(self.img.to_numpy().astype(np.float32) / frame)
             window.show()
 
-Film(Volume(r"D:\Code\Python\Graphics\Rendering\assets\vdb\aerial.json")).Show()
+Film(Volume(r".\assets\vdb\aerial.json")).Show()

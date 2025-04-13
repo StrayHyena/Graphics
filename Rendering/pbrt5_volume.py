@@ -19,7 +19,6 @@ CIEz = (0.0006061000,   0.0006808792,   0.0007651456,   0.0008600124,   0.000966
 CIE = ti.field(ti.f64,shape=(3,471))
 CIE.from_numpy(np.array([CIEx,CIEy,CIEz]))
 FNone,  INone, I3None   = -1.0,  -1,    vec3i(-1)
-# https://refractiveindex.info/  R 630 nm ,G 532 nm ,B 465 nm
 
 @ti.dataclass
 class Ray:
@@ -51,9 +50,9 @@ class Interaction:
     mp:MediumPointProperties
 
     @ti.func
-    def FetchInfo(self, volume):
+    def FetchInfo(self, volume,lambdas):
         self.pos = self.ray.At(self.t)
-        self.mp = volume.SamplePoint(self.pos)
+        self.mp = volume.SamplePoint(self.pos,lambdas)
         return self
 
 class PF:
@@ -211,24 +210,21 @@ class Volume:
 
     @ti.func
     def VisibleWavelengthsPDF(l:vec3):
-        ret =  0.0039398042 * (1-tm.tanh(0.0072 * (l - 538)))
+        ret =  0.0039398042 * (1-tm.tanh(0.0072 * (l - 538))**2)
         for i in ti.static(range(3)):
             if l[i]<360 or l[i]>830:ret[i] = 0
         return ret
 
     @ti.func
-    def SampleVisibleWavelengths(u:vec3) :
-        x = 0.85691062 - 1.82750197 * u
+    def SampleVisibleWavelengths() :
+        x = 0.85691062 - 1.82750197 * vec3(ti.random(),ti.random(),ti.random())
         return 538 - 138.888889 * 0.5*tm.log((1+x)/(1-x))
 
     @ti.func
     def Blackbody(wavelen:vec3,T:ti.f64):
         Le = vec3(0)
         if T>0:
-            c = 299792458.
-            h = 6.62606957e-34
-            kb = 1.3806488e-23
-            l = wavelen * 1e-9
+            c,h,kb,l = 299792458.,6.62606957e-34,1.3806488e-23,wavelen * 1e-9
             Le = (2 * h * c * c) / (l**5 * (ti.exp((h * c) / (l * kb * T)) - 1))
         return Le;
 
@@ -241,34 +237,24 @@ class Volume:
         return ret
 
     @ti.func
-    def SamplePoint(self,pos):
-        Le = vec3(0)
-        d = self.rho.At(pos)
-        T = self.T.At(pos)*self.TScale
+    def SamplePoint(self,pos,lambdas):
+        Le,d,T = vec3(0),self.rho.At(pos),self.T.At(pos)*self.TScale
         # black body emitter
         lambdaMax = 2.8977721e-3 / T
         normalizationFactor = 1 / Volume.Blackbody(vec3(lambdaMax) * 1e9, T)
-        u = vec3(ti.random(),ti.random(),ti.random())
-        lambdas = Volume.SampleVisibleWavelengths(u)
-        lpdfs   = Volume.VisibleWavelengthsPDF(lambdas)
         Le = Volume.Blackbody(lambdas, T) * normalizationFactor
-        # convert SampledSpetrum的功率谱到RGB的功率谱
-        LeRGB,Le = vec3(0),Le/lpdfs
-        for i in ti.static(range(3)):
-            for j in ti.static(range(3)):
-                LeRGB[i] += CIE[i,int(lambdas[j])-360]*Le[j]/3
-        return MediumPointProperties(sa=d*self.saScale,ss=d*self.ssScale,g=self.g,Le=LeRGB*self.LeScale)
+        return MediumPointProperties(sa=d*self.saScale,ss=d*self.ssScale,g=self.g,Le=Le*self.LeScale)
 
     @ti.kernel
     def Draw(self):
         for i,j in self.img:
             o = self.camera.origin + (i+ti.random()/2-1)*self.camera.unit_x + (j+ti.random()/2-1)*self.camera.unit_y
             ray = Ray(o=o,d = (o-self.camera.pos).normalized())
-            L,maj,depth = vec3(0),self.rho.max,0
+            L,maj,depth,lambdas = vec3(0),self.rho.max,0,Volume.SampleVisibleWavelengths()
             while depth<self.maxdepth:
                 if NOHIT ==  ray.HitAABB(self.bmin,self.bmax):break
                 t = -ti.log(1-ti.random())/maj
-                ix = Interaction(t,ray).FetchInfo(self)
+                ix = Interaction(t,ray).FetchInfo(self,lambdas)
                 u = self.SampleSaSsSn(ix.mp.sa/maj,ix.mp.ss/maj)
                 if u == 0:
                     L += ix.mp.Le
@@ -279,8 +265,15 @@ class Volume:
                     depth += 1
                 else:
                     ray.o = ix.pos
-            self.img[i,j] = L
+            # convert SampledSpetrum的功率谱到RGB的功率谱
+            lambdas_pdf = Volume.VisibleWavelengthsPDF(lambdas)
+            LeRGB,Le = vec3(0),L/lambdas_pdf
+            for i in ti.static(range(3)):
+                for j in ti.static(range(3)):
+                    LeRGB[i] += CIE[i,int(lambdas[j])-360]*Le[j]/3
+            self.img[i,j] = ti.Matrix([[3.2406,-1.5372, -0.4986],[-0.9689,1.8758,0.0415],[0.0557,-0.2040,1.057]])@LeRGB
 
+@ti.data_oriented
 class Film:
     def __init__(self,scene):
         self.img = ti.Vector.field(3,ti.f64,(WIDTH,HEIGHT))
@@ -297,4 +290,4 @@ class Film:
             canvas.set_image(self.img.to_numpy().astype(np.float32) / frame)
             window.show()
 
-Film(Volume(r"D:\Code\Python\Graphics\Rendering\assets\vdb\aerial.json")).Show()
+Film(Volume(r".\assets\vdb\aerial.json")).Show()
