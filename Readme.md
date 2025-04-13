@@ -1,5 +1,5 @@
-Python -- 3.8.10  
-Taichi -- 1.6.0  
+Python -- 3.10
+Taichi -- 1.7.3  
 
 <font color=#288FD4  size=5 >Linear Solver</font>
 - Jacobi
@@ -77,27 +77,6 @@ Taichi -- 1.6.0
 - Cubic equation solver (bisect)
 - Vertex-Face Edge-Edge Collision 
 <img src="./results/continuous_collision.gif" alt="show" />  
-
-<font color=#288FD4  size=5 >Ray Tracer</font>  
-- SAH BVH
-- Brdfs:
-  -   Specular Model:  GGX Microfacet
-  -   Diffuse  Model:  Lambert
-  -   Mirror
-  -   Glass
-- Volume Path Tracer
-- Importance Sampline:
-  -   sampling cosine term
-  -   sampling brdf term
-
-<img src="./results/bunny_mf.png"   alt="show" />  
-<img src="./results/sphere_mf.png"  alt="show" />  
-<img src="./results/glass.png"      alt="show" />  
-<img src="./results/mirror.png"     alt="show" />  
-<img src="./results/volume.png"     alt="show" />  
-
-<font color=#288FD4  size=5 >2D surface area heuristic BVH</font>  
-<img src="./results/bvh2d.gif" alt="show" />  
 
 # <a href="https://pbr-book.org/4ed/contents" target="_blank"> Physically Based Rendering </a>
 
