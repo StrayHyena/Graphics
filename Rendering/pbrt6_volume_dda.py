@@ -50,9 +50,9 @@ class Interaction:
     mp:MediumPointProperties
 
     @ti.func
-    def FetchInfo(self, volume,lambdas):
+    def FetchInfo(self, volume):
         self.pos = self.ray.At(self.t)
-        self.mp = volume.SamplePoint(self.pos,lambdas)
+        self.mp = volume.SamplePoint(self.pos)
         return self
 
 class PF:
@@ -266,7 +266,7 @@ class Volume:
         self.g   = 0.0
         self.img = ti.Vector.field(3,ti.f64,(WIDTH,HEIGHT))
         self.camera = camera
-        self.envLe = vec3(37/255, 150/255, 190/255)
+        self.envLe = vec3(135/255, 206/255, 235/255)
 
     @ti.func
     def VisibleWavelengthsPDF(l:vec3):
@@ -300,22 +300,30 @@ class Volume:
         return ret
 
     @ti.func
-    def SamplePoint(self,pos,lambdas):
+    def SamplePoint(self,pos):
         Le = vec3(0)
         d = self.rho.At(pos)
         T = self.T.At(pos)*self.TScale
         # black body emitter
         lambdaMax = 2.8977721e-3 / T
         normalizationFactor = 1 / Volume.Blackbody(vec3(lambdaMax) * 1e9, T)
+        lambdas = Volume.SampleVisibleWavelengths()
         Le = Volume.Blackbody(lambdas, T) * normalizationFactor
-        return MediumPointProperties(sa=d*self.saScale,ss=d*self.ssScale,g=self.g,Le=Le*self.LeScale)
+        # convert SampledSpetrum的功率谱到RGB的功率谱
+        lambdas_pdf = Volume.VisibleWavelengthsPDF(lambdas)
+        LeRGB, Le = vec3(0), Le / lambdas_pdf
+        for i in ti.static(range(3)):
+            for j in ti.static(range(3)):
+                LeRGB[i] += CIE[i, int(lambdas[j]) - 360] * Le[j] / 3
+        LeRGB = ti.Matrix([[3.2406, -1.5372, -0.4986], [-0.9689, 1.8758, 0.0415], [0.0557, -0.2040, 1.057]]) @ LeRGB
+        return MediumPointProperties(sa=d*self.saScale,ss=d*self.ssScale,g=self.g,Le=LeRGB*self.LeScale)
 
     @ti.kernel
     def Draw(self):
         for i,j in self.img:
             o = self.camera.origin + (i+ti.random()/2-1)*self.camera.unit_x + (j+ti.random()/2-1)*self.camera.unit_y
             ray = Ray(o=o,d = (o-self.camera.pos).normalized())
-            L, terminate,depth,lambdas = vec3(0),  False,0,Volume.SampleVisibleWavelengths()
+            L, terminate,depth = vec3(0),  False,0
             while depth < self.maxdepth and not terminate :
                 ddaiter = DDAIter(t=MAX3, d=MAX3, dir=ray.d, curr=vec3i(-1), prev=vec3i(-1), res=self.rho.majres, curr_t=0, base_t=MAX).Init(self.bmin, self.bmax, self.rho.majres, ray)
                 rayt, u = ddaiter.base_t, 2  # base_t是光线起点到box第一个交点的t. prev_t是p0(base_t)到前一个voxel的t
@@ -328,7 +336,7 @@ class Volume:
                         if rayt > ddaiter.base_t + ddaiter.curr_t:
                             rayt = ddaiter.base_t + ddaiter.curr_t
                             break
-                        ix = Interaction(rayt, ray).FetchInfo(self,lambdas)
+                        ix = Interaction(rayt, ray).FetchInfo(self)
                         u = self.SampleSaSsSn(ix.mp.sa / maj, ix.mp.ss / maj)
                         if u == 0:
                             L += ix.mp.Le
@@ -339,13 +347,10 @@ class Volume:
                             ray = sample.ray
                             depth += 1
                             break
-                if ddaiter.IsPrevExceed() and u == 2: break  # 射出maj grid
-            lambdas_pdf = Volume.VisibleWavelengthsPDF(lambdas)
-            LeRGB, Le = vec3(0), L / lambdas_pdf
-            for i in ti.static(range(3)):
-                for j in ti.static(range(3)):
-                    LeRGB[i] += CIE[i, int(lambdas[j]) - 360] * Le[j] / 3
-            self.img[i, j] = ti.Matrix([[3.2406,-1.5372, -0.4986],[-0.9689,1.8758,0.0415],[0.0557,-0.2040,1.057]])@LeRGB
+                if ddaiter.IsPrevExceed() and u == 2:
+                    L += self.envLe
+                    break  # 射出maj grid
+            self.img[i, j] = L
 
 
 class Film:

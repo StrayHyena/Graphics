@@ -50,9 +50,9 @@ class Interaction:
     mp:MediumPointProperties
 
     @ti.func
-    def FetchInfo(self, volume,lambdas):
+    def FetchInfo(self, volume):
         self.pos = self.ray.At(self.t)
-        self.mp = volume.SamplePoint(self.pos,lambdas)
+        self.mp = volume.SamplePoint(self.pos)
         return self
 
 class PF:
@@ -206,7 +206,7 @@ class Volume:
         self.g   = 0.0
         self.img = ti.Vector.field(3,ti.f64,(WIDTH,HEIGHT))
         self.camera = camera
-        self.envLe = vec3(37/255, 150/255, 190/255)
+        self.envLe = vec3(135/255, 206/255, 235/255)
 
     @ti.func
     def VisibleWavelengthsPDF(l:vec3):
@@ -237,24 +237,34 @@ class Volume:
         return ret
 
     @ti.func
-    def SamplePoint(self,pos,lambdas):
+    def SamplePoint(self,pos):
         Le,d,T = vec3(0),self.rho.At(pos),self.T.At(pos)*self.TScale
         # black body emitter
         lambdaMax = 2.8977721e-3 / T
         normalizationFactor = 1 / Volume.Blackbody(vec3(lambdaMax) * 1e9, T)
+        lambdas = Volume.SampleVisibleWavelengths()
         Le = Volume.Blackbody(lambdas, T) * normalizationFactor
-        return MediumPointProperties(sa=d*self.saScale,ss=d*self.ssScale,g=self.g,Le=Le*self.LeScale)
+        # convert SampledSpetrum的功率谱到RGB的功率谱
+        lambdas_pdf = Volume.VisibleWavelengthsPDF(lambdas)
+        LeRGB, Le = vec3(0), Le / lambdas_pdf
+        for i in ti.static(range(3)):
+            for j in ti.static(range(3)):
+                LeRGB[i] += CIE[i, int(lambdas[j]) - 360] * Le[j] / 3
+        LeRGB = ti.Matrix([[3.2406, -1.5372, -0.4986], [-0.9689, 1.8758, 0.0415], [0.0557, -0.2040, 1.057]]) @ LeRGB
+        return MediumPointProperties(sa=d*self.saScale,ss=d*self.ssScale,g=self.g,Le=LeRGB*self.LeScale)
 
     @ti.kernel
     def Draw(self):
         for i,j in self.img:
             o = self.camera.origin + (i+ti.random()/2-1)*self.camera.unit_x + (j+ti.random()/2-1)*self.camera.unit_y
             ray = Ray(o=o,d = (o-self.camera.pos).normalized())
-            L,maj,depth,lambdas = vec3(0),self.rho.max,0,Volume.SampleVisibleWavelengths()
+            L,maj,depth, = vec3(0),self.rho.max,0,
             while depth<self.maxdepth:
-                if NOHIT ==  ray.HitAABB(self.bmin,self.bmax):break
+                if NOHIT ==  ray.HitAABB(self.bmin,self.bmax):
+                    L += self.envLe
+                    break
                 t = -ti.log(1-ti.random())/maj
-                ix = Interaction(t,ray).FetchInfo(self,lambdas)
+                ix = Interaction(t,ray).FetchInfo(self)
                 u = self.SampleSaSsSn(ix.mp.sa/maj,ix.mp.ss/maj)
                 if u == 0:
                     L += ix.mp.Le
@@ -265,13 +275,7 @@ class Volume:
                     depth += 1
                 else:
                     ray.o = ix.pos
-            # convert SampledSpetrum的功率谱到RGB的功率谱
-            lambdas_pdf = Volume.VisibleWavelengthsPDF(lambdas)
-            LeRGB,Le = vec3(0),L/lambdas_pdf
-            for i in ti.static(range(3)):
-                for j in ti.static(range(3)):
-                    LeRGB[i] += CIE[i,int(lambdas[j])-360]*Le[j]/3
-            self.img[i,j] = ti.Matrix([[3.2406,-1.5372, -0.4986],[-0.9689,1.8758,0.0415],[0.0557,-0.2040,1.057]])@LeRGB
+            self.img[i,j] = L
 
 @ti.data_oriented
 class Film:
