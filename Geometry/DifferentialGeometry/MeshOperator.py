@@ -8,8 +8,6 @@ import trimesh, os
 import numpy as np
 import scipy.sparse as sp
 import scipy.linalg as scila
-from traits.trait_types import self
-
 
 class Halfedge:
     def __init__(self):
@@ -617,30 +615,45 @@ class Mesh(trimesh.Trimesh):
         return np.array(face_vector)
     #------------------------------------------------- Vector Field Design -------------------------------------------------
 
-def Check_dxd_with_Lc(mesh):
-    dxd = (mesh._d1@mesh.x1@mesh.d0).todense()
-    lc = mesh.Lc.todense()
-    assert dxd.shape==lc.shape
-    for i in range(dxd.shape[0]):
-        for j in range(dxd.shape[1]):
-            if np.isclose(dxd[i,j],0) and np.isclose(lc[i,j],0): continue
-            elif not np.isclose(dxd[i,j],0) and not np.isclose(lc[i,j],0): print(i,j,dxd[i,j]/lc[i,j])
-            else: print(i,j,dxd[i,j],lc[i,j])
+# this class validates several identities or equations numerically
+class Validator:
+    @staticmethod
+    def CompareMatrix(A,B):
+        A,B = A.todense(),B.todense()
+        assert A.shape == B.shape
+        for i in range(A.shape[0]):
+            for j in range(A.shape[1]):
+                if not np.isclose(A[i,j]-B[i,j],0) :
+                    print(i,j,A[i,j],B[i,j])
+
+    # check d*d is equal to Lc(calculate using cotan formula)
+    @staticmethod
+    def dxd_Lc(m:Mesh):
+        Validator.CompareMatrix(m._d1@m.x1@m.d0,m.Lc)
+
+    @staticmethod
+    def Green_1st(m:Mesh):
+        def Grad(u):
+            grad_u = np.zeros_like(m.faces).astype(float)
+            for i, v in enumerate(m.Vertexs):
+                for he in v.halfedges:
+                    if he.boundary: continue
+                    grad_u[he.fi] += u[i] / (2 * m.area_faces[he.fi]) * np.cross(m.face_normals[he.fi], he.next.vector)
+            return grad_u
+        u = np.array([np.linalg.norm(v)**2 for v in m.vertices])
+        # u = np.array([1.0 for v in m.vertices])
+        v = np.array([1.0 for v in m.vertices]) # np.sin(v[0])*10+3*v[1]+v[2]**2+10
+        # u,v = np.random.rand(m.vn),np.random.rand(m.vn)
+        du,dv = Grad(u),Grad(v)
+        integral0 = sum([du[i].T@dv[i]*m.area_faces[i] for i in range(m.fn)])
+        integral1 = u.T@m.Lc@v
+        print('∫∇u•∇vdA  '  ,integral0)
+        print('∫v∧*Δu    '  ,integral1)
+        print('sum    '  ,integral0+integral1)
 
 if __name__ == '__main__':
     np.set_printoptions(suppress=True,precision=3)
     print()
-    mesh = Mesh(os.path.join(__file__, '..', 'input', 'cube.obj'))
-    # mesh = Mesh(os.path.join(__file__, '..', 'input', 'sphere.obj'))
-    # mesh = Mesh(os.path.join(__file__, '..', 'input', 'torus.obj'))
-    phi = mesh.TrivialConnection()
-    # for i,p in enumerate(phi):print(i,p)
-    mesh.VisualizeConnection(phi)
-    # mesh.TreeCotree()
-    # mesh.Generators()
-    # mesh.RandomParallelVector()
-    # print(mesh.euler_number)
-    # mesh = Mesh(os.path.join(__file__, '..', 'input', 'face.obj'))
-    # mesh = Mesh(os.path.join(__file__, '..', 'input', 'triangle.obj'))
-    # Check_dxd_with_Lc(mesh)
-    # mesh.VisualizeParameterization(mesh.SpectralConformalParameterization())
+    mesh = Mesh(os.path.join(__file__, '..', 'input', 'quad.obj'))
+    # Validator.dxd_Lc(mesh)
+    Validator.Green_1st(mesh)
