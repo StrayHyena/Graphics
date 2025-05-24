@@ -25,9 +25,9 @@ def Main(testcase):
         }
         harmonicBases = mesh.VisualizeHarmonicBases()
         for i,basis in enumerate(harmonicBases): data['HarmonicBasis'+str(i)]=basis
-    if testcase == QMC:
-        mesh = Mesh(os.path.join(__file__, '..', 'input', 'quad-circle.obj'))
-        data = {'':mesh.CrossField()}
+    # if testcase == QMC:
+    #     mesh = Mesh(os.path.join(__file__, '..', 'input', 'quad-circle.obj'))
+    #     data = {'':mesh.CrossField()}
     ps.set_warn_for_invalid_values(True)
     ps.set_ground_plane_mode("shadow_only")
     ps.set_background_color((0.5,0.5,0.5))

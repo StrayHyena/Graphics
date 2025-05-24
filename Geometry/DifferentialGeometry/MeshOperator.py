@@ -8,6 +8,26 @@ import trimesh, os
 import numpy as np
 import scipy.sparse as sp
 import scipy.linalg as scila
+from collections import defaultdict
+
+class MatrixBuilder:
+    def __init__(self, row_cnt,col_cnt):
+        self.rn,self.cn = row_cnt,col_cnt
+        self.triplets = defaultdict(np.float64)
+    def AddTriplet(self,ri,ci,value):
+        self.triplets[(ri,ci)] += value
+        return self
+    def SetTriplet(self,ri,ci,value):
+        self.triplets[(ri,ci)] = value
+        return self
+    @property
+    def scipy_coo_matrix(self):
+        row,col,val = [],[],[]
+        for (ri,ci),v in self.triplets.items():
+            row.append(ri)
+            col.append(ci)
+            val.append(v)
+        return sp.coo_matrix((val, (row, col)), shape=(self.rn, self.cn))
 
 class Halfedge:
     def __init__(self):
@@ -82,6 +102,8 @@ class Mesh(trimesh.Trimesh):
         self.vn = len(self.vertices)
         self.fn = len(self.faces)
         self.en = len(self.edges_unique)
+        self.chi = self.vn-self.en+self.fn
+        self.bn = max(0,2-self.chi)
         self.IJ2UniqueEdgeIdx = {}
         for ei,(i,j) in enumerate(self.edges_unique):self.IJ2UniqueEdgeIdx[(i,j)] = ei
         self.m_d0,self.m_d1,self.m_x0,self.m_x1,self.m_x2 = None,None,None,None,None
@@ -100,6 +122,7 @@ class Mesh(trimesh.Trimesh):
             he = self.Halfedges[ei]
             he.v0, he.v1 = self.Vertexs[vi],self.Vertexs[vj]
             he.v0.halfedges.append(he)
+            # print(ei)
             he.twin = self.Halfedges[IJ2EdgeIdx[(vj,vi)]]
             if (vi, vj) in boundaryEdgeIdx:he.boundary = True
         for fi,vidxs in enumerate(self.faces):
@@ -159,15 +182,10 @@ class Mesh(trimesh.Trimesh):
     @property
     def d0(self):
         if self.m_d0 is not None:return self.m_d0
-        row, col, data = [], [], []
+        matrix_builder = MatrixBuilder(self.en,self.vn)
         for ei,(vi,vj) in enumerate(self.edges_unique):
-            row.append(ei)
-            col.append(vj)
-            data.append(1)
-            row.append(ei)
-            col.append(vi)
-            data.append(-1)
-        self.m_d0 = sp.coo_matrix((data,(row,col)),shape=(self.en,self.vn))
+            matrix_builder.SetTriplet(ei,vj,1).SetTriplet(ei, vi, -1)
+        self.m_d0 =  matrix_builder.scipy_coo_matrix
         return self.m_d0
 
     # discrete operator d apply to PRIMAL 1-form, a |F|×|E| matrix
@@ -257,19 +275,15 @@ class Mesh(trimesh.Trimesh):
     @property
     def Lc(self): # d*d
         if self.m_Lc is not None:return self.m_Lc
-        row, col, data = [], [], []
+        matrix_builder = MatrixBuilder(self.vn,self.vn)
         for  v in self.Vertexs:
             w_sum = 1e-8
             for h in v.halfedges:
                 w = (h.cotan + h.twin.cotan) / 2
-                row.append(v.i)
-                col.append(h.v1.i)
-                data.append(w)
+                matrix_builder.SetTriplet(v.i,h.v1.i,w)
                 w_sum += w
-            row.append(v.i)
-            col.append(v.i)
-            data.append(-w_sum)
-        self.m_Lc = sp.coo_matrix((data, (row, col)), shape=(self.vn, self.vn))
+            matrix_builder.SetTriplet(v.i,v.i,-w_sum)
+        self.m_Lc = matrix_builder.scipy_coo_matrix
         return self.m_Lc
 
     @property
@@ -306,7 +320,8 @@ class Mesh(trimesh.Trimesh):
         return u
 
     #------------------------------------------------- SCP -------------------------------------------------
-    def SpectralConformalParameterization(self):
+    # 对mesh上的每一个点都求得了复平面上对应的一个点
+    def SpectralConformalParameterization(self,ComplexAsVec2d=False):
         def I(i,j):
             return sp.coo_matrix(([1],([i],[j])),shape=(self.vn, self.vn))
         ED = -0.5*self.Lc
@@ -332,8 +347,12 @@ class Mesh(trimesh.Trimesh):
             l = x.conj().T@EC@x
             r = np.linalg.norm(EC@x-l*x)
             # print(_,r)
-            if r < 1e-10: return x
+            if r < 1e-10: break
         print('WARNING: Spectral Conformal Parameterization may not converge')
+        if ComplexAsVec2d: # translate leftlower to (0,0); rescale to (1,1)
+            u, v = np.real(x), np.imag(x)
+            u ,v = u - min(u),v - min(v)
+            return np.column_stack((u,v))*min(1/max(u),1/max(v))
         return x
 
     def VisualizeParameterization3D(self, uv):
@@ -531,17 +550,15 @@ class Mesh(trimesh.Trimesh):
         tree_lines = []
         for i,j in enumerate(tree):tree_lines.extend([self.vertices[i],self.vertices[j]])
         cotree_lines = []
-        scale = 0.002 # normal extrusion for better visualization
-        for i,j in enumerate(cotree):cotree_lines.extend([self.triangles_center[i]+scale*self.face_normals[i],self.triangles_center[j]]+scale*self.face_normals[j])
+        for i,j in enumerate(cotree):cotree_lines.extend([self.triangles_center[i],self.triangles_center[j]])
         return np.array(tree_lines+cotree_lines)
     def VisualizeGenerators(self):
         generators = self.Generators()
         lines = []
-        scale = 0.002 # normal extrusion for better visualization
         for generator in generators:
             for _i in range(len(generator)-1):
                 i,j  = generator[_i],generator[_i+1]
-                lines.extend([self.triangles_center[i]+scale*self.face_normals[i],self.triangles_center[j]+scale*self.face_normals[j]])
+                lines.extend([self.triangles_center[i],self.triangles_center[j]])
         return np.array(lines)
     def VisualizeHarmonicBases(self):
         return [self.Whitney1Form(base) for base in self.HarmonicBases()]
@@ -613,6 +630,65 @@ class Mesh(trimesh.Trimesh):
             angle = fid2angle[fi]
             face_vector.append( e0*np.cos(angle)+e1*np.sin(angle))
         return np.array(face_vector)
+    # ============= Globally Optimal Direction Fields =============
+    def NDirectionField(self,n=1,Senergy=0):
+        s = np.pi*2/(2*np.pi-self.vertex_defects)
+        # 默认Vertex的halfedges[0]是basis section(Xi), thetas里存放着每个点对每个incident edge的夹角 (eij与Xi的夹角)
+        # thetas = [[0]]*self.vn
+        thetas = {}
+        for vi,v in enumerate( self.Vertexs ):
+            for hei,he in enumerate(v.halfedges):
+                if hei==0:
+                    thetas[(vi,he.v1.i)] = 0
+                else:
+                    vj,vj_prev = he.v1.i,v.halfedges[hei-1].v1.i
+                    xi,xj,xj_prev = he.v0.p,he.v1.p,self.vertices[vj_prev]
+                    thetas[(vi,vj)] = thetas[(vi,vj_prev)] + np.arccos(np.dot(xj-xi,xj_prev-xi)/np.linalg.norm(xj-xi)/np.linalg.norm(xj_prev-xi))
+        rho = {}
+        for vi,vj in self.edges:
+            rho[(vi,vj)] = n*(s[vj]*thetas[(vj,vi)]-s[vi]*thetas[(vi,vj)])
+        e_iOmega = [1]*self.fn
+        for fi,vis in enumerate(self.faces):
+            for i in range(3):
+                e_iOmega[fi]*= np.exp(1j*rho[(vi,vj)])
+        Omega = np.angle(e_iOmega)
+        f1 = lambda s: (3+1j*s+s**4/24-1j*s**5/60+(-3+2j*s+s*s/2)*np.exp(1j*s))/s**4
+        f2 = lambda s: (4+1j*s-1j*s**3/6-s**4/12+1j*s**5/30+(-4+3j*s+s*s)*np.exp(1j*s))/s**4
+        Mbuilder = MatrixBuilder(self.vn,self.vn)
+        Abuilder = MatrixBuilder(self.vn,self.vn)
+        for fi,vis in enumerate(self.faces):
+            for i in range(3):
+                vi,vj,vk = vis[i],vis[(i+1)%3],vis[(i+2)%3]
+                S,omega,r_jk = self.area_faces[fi],Omega[fi],np.exp(1j*rho[(vj,vk)])
+                M_ii = S/6
+                M_jk = np.conj(r_jk)*S*(6*np.exp(1j*omega)-6-6j*omega+3*omega**2+1j*omega**3)/3/omega**4
+
+                xi,xj,xk = self.vertices[vi],self.vertices[vj],self.vertices[vk]
+                pjk,pij,pki = xk-xj,xj-xi,xi-xk
+                pjk2,pij2,pki2 = np.dot(pjk,pjk),np.dot(pij,pij),np.dot(pki,pki)
+                pijpik = np.dot(pij,-pki)
+                N_ii = (pjk2+omega**2*(pij2+pijpik+pki2)/90)/S/4
+                N_jk = np.conj(r_jk)*((pij2+pki2)*f1(omega)+pijpik*f2(omega))/S
+
+                A_ii = N_ii - Senergy*omega/S*M_ii
+                A_jk = N_jk - Senergy*(omega/S*M_jk-(1 if (vj,vk) in self.edges_unique else -1)*1j*np.conj(r_jk)/2)
+
+                Mbuilder.AddTriplet(vi,vi,M_ii).AddTriplet(vj,vk,M_jk)
+                Abuilder.AddTriplet(vi,vi,A_ii).AddTriplet(vj,vk,A_jk)
+
+        M = Mbuilder.scipy_coo_matrix
+        A = Abuilder.scipy_coo_matrix
+        Validator.IsHermitian(M)
+        exit(0)
+        x = np.random.rand(self.vn) + 1j * np.random.rand(self.vn)
+        for _ in range(100):
+            x = sp.linalg.spsolve(A, M@x)
+            x = x / np.sqrt(x.conj().T @ M @ x )
+            r = np.linalg.norm(A @ x - (x.conj().T@A@x)*(M@x) )
+            print(_,r)
+            if r < 1e-10: break
+        return x
+
     #------------------------------------------------- Vector Field Design -------------------------------------------------
 
 # this class validates several identities or equations numerically
@@ -632,7 +708,15 @@ class Validator:
         Validator.CompareMatrix(m._d1@m.x1@m.d0,m.Lc)
 
     @staticmethod
-    def Green_1st(m:Mesh):
+    def IsHermitian(M):
+        M = M.todense()
+        delta = M-np.conj(M.T)
+        print(np.max(np.abs(delta)))
+
+    # 无论m是否是有边界的(sphere,disk)  ∫∇u•∇vdA+∫v∧*Δu=0
+    # 这主要是在于 discrete laplacian-beltrami 在构建的时候对边界情况的处理(cot的一边是0)。
+    @staticmethod
+    def Green1st(m:Mesh,type=0):
         def Grad(u):
             grad_u = np.zeros_like(m.faces).astype(float)
             for i, v in enumerate(m.Vertexs):
@@ -640,20 +724,30 @@ class Validator:
                     if he.boundary: continue
                     grad_u[he.fi] += u[i] / (2 * m.area_faces[he.fi]) * np.cross(m.face_normals[he.fi], he.next.vector)
             return grad_u
-        u = np.array([np.linalg.norm(v)**2 for v in m.vertices])
-        # u = np.array([1.0 for v in m.vertices])
-        v = np.array([1.0 for v in m.vertices]) # np.sin(v[0])*10+3*v[1]+v[2]**2+10
-        # u,v = np.random.rand(m.vn),np.random.rand(m.vn)
+        if type==0:    # 【u】random 【v】random
+            u,v = np.random.rand(m.vn),np.random.rand(m.vn)
+        elif type==1:  # 【u】radial 【v】costant 1
+            u = np.array([np.linalg.norm(v)**2 for v in m.vertices])
+            v = np.array([1.0 for v in m.vertices]) # np.sin(v[0])*10+3*v[1]+v[2]**2+10
+        elif type==2:  # 【u】【v】 linear x+z   ∫∇u•∇vdA should be 2A
+            u = np.array([v[0]+v[2] for v in m.vertices])
+            v = np.array([v[0] + v[2] for v in m.vertices])
         du,dv = Grad(u),Grad(v)
         integral0 = sum([du[i].T@dv[i]*m.area_faces[i] for i in range(m.fn)])
         integral1 = u.T@m.Lc@v
         print('∫∇u•∇vdA  '  ,integral0)
         print('∫v∧*Δu    '  ,integral1)
-        print('sum    '  ,integral0+integral1)
+        print('sum    '  ,integral0+integral1,end='\n\n')
+
+#             chi    |     bn
+# sphere      2      |     0
+# torus       0      |     2
+# disk        1      |     1
+# quad-circle 0      |     2
 
 if __name__ == '__main__':
-    np.set_printoptions(suppress=True,precision=3)
-    print()
-    mesh = Mesh(os.path.join(__file__, '..', 'input', 'quad.obj'))
-    # Validator.dxd_Lc(mesh)
-    Validator.Green_1st(mesh)
+    # np.set_printoptions(suppress=True,precision=3)
+    # print()
+    # # Validator.Green_1st(Mesh(os.path.join(__file__, '..', 'input', 'quadx.obj')),2)
+    Mesh(os.path.join(__file__, '..', 'input', 'quad-circle.obj'))
+
