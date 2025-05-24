@@ -106,9 +106,13 @@ class Mesh(trimesh.Trimesh):
         self.bn = max(0,2-self.chi)
         self.IJ2UniqueEdgeIdx = {}
         for ei,(i,j) in enumerate(self.edges_unique):self.IJ2UniqueEdgeIdx[(i,j)] = ei
+
         self.m_d0,self.m_d1,self.m_x0,self.m_x1,self.m_x2 = None,None,None,None,None
         self.m__x0,self.m__x1,self.m__x2 = None,None,None
         self.m_Lc = None
+        self.m_tree,self.m_cotree = None,None
+        self.m_generators = None
+        self.m_harmonic_bases = None
 
         IJ2EdgeIdx = {(vi, vj): i for i, (vi, vj) in enumerate(self.edges)}
         boundaryEdgeIdx = set()
@@ -177,7 +181,7 @@ class Mesh(trimesh.Trimesh):
             for e in v.halfedges: print(e,end='')
             print()
 
-    # ---------------------------------DISCRETE DIFFERENTIAL OPERATOR-------------------------------------------
+    # ---------------------------------DISCRETE DIFFERENTIAL OPERATOR START-------------------------------------------
     # discrete operator d apply to PRIMAL 0-form, a |E|×|V| matrix
     @property
     def d0(self):
@@ -289,7 +293,7 @@ class Mesh(trimesh.Trimesh):
     @property
     def L(self): # *d*d
         return sp.coo_matrix( self._x2 @ self.Lc )
-    # ---------------------------------DISCRETE DIFFERENTIAL OPERATOR-------------------------------------------
+    # ---------------------------------DISCRETE DIFFERENTIAL OPERATOR END-------------------------------------------
 
     @property
     def K(self): # Gaussian Curvature
@@ -312,6 +316,137 @@ class Mesh(trimesh.Trimesh):
         H = H * 0.25
         return H
 
+    # tree: 以vertex 0为根的由edge组成的tree, cotree:以face 0为根的由dual edge组成的tree
+    @property
+    def tree(self):
+        if self.m_tree is not None:return self.m_tree
+        tree = [i for i in range(self.vn)]
+        root = [0]
+        while root != []:
+            parentId = root.pop(0)
+            for he in self.Vertexs[parentId].halfedges:
+                childId = he.v1.i
+                if childId == 0 or tree[childId] != childId : continue  # already processed
+                tree[childId] = parentId
+                root.append(childId)
+        self.m_tree = tree
+        tree_lines = [] # for visualize
+        for i, j in enumerate(tree): tree_lines.extend([self.vertices[i], self.vertices[j]])
+        self.tree_lines = np.array(tree_lines)
+        return self.m_tree
+
+    @property
+    def cotree(self):
+        if self.m_cotree is not None:return self.m_cotree
+        cotree = [i for i in range(self.fn)]
+        root = [0]
+        while root != []:
+            parentId = root.pop(0)
+            for _ in range(3):
+                i0, i1 = self.faces[parentId][_], self.faces[parentId][(_ + 1) % 3]
+                he = self.IJ2HalfEdge[(i0, i1)]
+                if he.twin.boundary: continue
+                childId = he.twin.fi
+                if cotree[childId] != childId or childId==0 or self.tree[he.v0.i]==he.v1.i or self.tree[he.v1.i]==he.v0.i: continue  # already processed or cross tree
+                cotree[childId] = parentId
+                root.append(childId)
+        self.m_cotree = cotree
+        cotree_lines = []  # for visualize
+        for i, j in enumerate(self.cotree): cotree_lines.extend([self.triangles_center[i], self.triangles_center[j]])
+        self.cotree_lines = np.array(cotree_lines)
+        return self.m_cotree
+
+    # each generator is a closed path that starts with x(face idx) and ends with x
+    @property
+    def generators(self):
+        if self.m_generators is not None:return self.m_generators
+        def TraceToRoot(tree, i):
+            ret = [i]
+            while tree[ret[-1]] != ret[-1]: ret.append(tree[ret[-1]])
+            return ret
+        generators = []
+        for edge in self.edges_unique:
+            he = self.IJ2HalfEdge[(edge[0], edge[1])]
+            if he.boundary or he.twin.boundary: continue
+            fi, fj = he.fi, he.twin.fi
+            if self.cotree[fi] == fj or self.cotree[fj] == fi or self.tree[he.v0.i] == he.v1.i or self.tree[
+                he.v1.i] == he.v0.i: continue
+            tracei, tracej = TraceToRoot(self.cotree, fi), TraceToRoot(self.cotree, fj)
+            lastCommon = -1
+            while tracei[-1] == tracej[-1]:
+                lastCommon = tracei.pop()
+                lastCommon = tracej.pop()
+            generators.append([lastCommon] + tracei[::-1] + tracej + [lastCommon])
+        self.m_generators = generators
+        lines = []
+        for generator in generators:
+            for _i in range(len(generator) - 1):
+                i, j = generator[_i], generator[_i + 1]
+                lines.extend([self.triangles_center[i], self.triangles_center[j]])
+        self.generators_lines = np.array(lines)  # for visualize
+        return self.m_generators
+
+    @property
+    def harmonic_bases(self):
+        if self.m_harmonic_bases is not None:return self.m_harmonic_bases
+        def CommonEdge(fi,fj): #用一个来自fi的halfedge(有向边)来表示这个有向的generator
+            for i in range(3):
+                for j in range(3):
+                    if min(self.faces[fi][i],self.faces[fi][(i+1)%3])==min(self.faces[fj][j],self.faces[fj][(j+1)%3]) and max(self.faces[fi][i],self.faces[fi][(i+1)%3])==max(self.faces[fj][j],self.faces[fj][(j+1)%3]) :
+                        vi,vj = min(self.faces[fi][i],self.faces[fi][(i+1)%3]),max(self.faces[fi][i],self.faces[fi][(i+1)%3])
+                        if self.IJ2HalfEdge[(vi,vj)].fi==fi:return (vi,vj)
+                        else:                               return (vj,vi)
+        bases = []
+        for generator in self.generators:
+            oneform = np.zeros(self.en)
+            for i in range(len(generator)-1):
+                fi,fj = generator[i],generator[i+1]
+                vi0,vi1 = CommonEdge(fi,fj)
+                if (vi0,vi1) not in self.IJ2UniqueEdgeIdx: oneform[self.IJ2UniqueEdgeIdx[(vi1,vi0)]]=-1
+                else:oneform[self.IJ2UniqueEdgeIdx[(vi0,vi1)]]=1
+            bases.append(oneform-self.d0@ HodgeDecomposition(self,oneform).alpha)
+        self.m_harmonic_bases = bases
+        self.harmonic_bases_on_face = [self.Whitney1Form(base) for base in bases] # for visualize
+        return self.m_harmonic_bases
+
+    # get 1-form on circumcenter of triangle face
+    def Whitney1Form(self,oneform):
+        face1form = np.array([np.zeros(3) for _ in range(self.fn)])
+        for fi,idxs in enumerate(self.faces):
+            N = self.face_normals[fi]
+            A = self.area_faces[fi]
+            for _ in range(3):
+                i,j,k = idxs[_],idxs[(_+1)%3],idxs[(_+2)%3]
+                vi,vj,vk = self.vertices[i],self.vertices[j],self.vertices[k]
+                phi_ij = np.cross(N,(vi-vk) + (vj-vk))/(6*A)
+                if (i,j) in self.IJ2UniqueEdgeIdx: phi_ij *= oneform[self.IJ2UniqueEdgeIdx[(i,j)]]
+                else: phi_ij *= -oneform[self.IJ2UniqueEdgeIdx[(j,i)]]
+                face1form[fi] += phi_ij
+        return face1form
+
+    def Random1Form(self):
+        scalar_potential = np.zeros(self.vn)
+        vector_potential = np.zeros(self.vn)
+        for _ in range(self.vn//500):
+            scalar_potential[np.random.choice(self.vn)] = 5000*np.random.rand()-2500
+            vector_potential[np.random.choice(self.vn)] = 5000 * np.random.rand() - 2500
+        scalar_potential = sp.linalg.spsolve(self.L,scalar_potential)
+        vector_potential = sp.linalg.spsolve(self.L,vector_potential)
+        face_omega = np.array([np.zeros(3) for _ in range(self.fn)])
+        for he in self.Halfedges:
+            if he.boundary:continue
+            A = self.area_faces[he.fi]
+            N = self.face_normals[he.fi]
+            counter_idx = he.next.v1.i
+            face_omega[he.fi] += scalar_potential[counter_idx]*np.cross(N,he.vector)/(2*A)
+            face_omega[he.fi] += vector_potential[counter_idx]*np.cross(N,np.cross(N,he.vector))/(2*A)
+        omega = np.zeros(self.en)
+        for i,(ei,ej) in enumerate(self.edges_unique):
+            he = self.IJ2HalfEdge[(ei,ej)]
+            if not he.boundary:         omega[i] += np.dot(he.vector,face_omega[he.fi])
+            if not he.twin.boundary:    omega[i] += np.dot(he.vector,face_omega[he.twin.fi])
+        return omega
+
     def ScalarPoissonProblem(self,idx=0):
         rho = np.array( [(0 if i!=idx else 1) for i in range(self.vn) ])
         diagM = np.array([v.CircumcentricDualArea() for v in self.Vertexs])
@@ -319,9 +454,11 @@ class Mesh(trimesh.Trimesh):
         u = sp.linalg.spsolve(self.L, np.array(rhs))
         return u
 
-    #------------------------------------------------- SCP -------------------------------------------------
-    # 对mesh上的每一个点都求得了复平面上对应的一个点
-    def SpectralConformalParameterization(self,ComplexAsVec2d=False):
+# ------------------------------ Some Operation Class  注意下面这些类的成员变量名称最好不要有重复 -----------------------------------------
+class SpectralConformalParameterization(Mesh):
+    def __init__(self,mesh):
+        self.__dict__ = mesh.__dict__
+        # 对mesh上的每一个点都求得了复平面上对应的一个点
         def I(i,j):
             return sp.coo_matrix(([1],([i],[j])),shape=(self.vn, self.vn))
         ED = -0.5*self.Lc
@@ -349,14 +486,13 @@ class Mesh(trimesh.Trimesh):
             # print(_,r)
             if r < 1e-10: break
         print('WARNING: Spectral Conformal Parameterization may not converge')
-        if ComplexAsVec2d: # translate leftlower to (0,0); rescale to (1,1)
-            u, v = np.real(x), np.imag(x)
-            u ,v = u - min(u),v - min(v)
-            return np.column_stack((u,v))*min(1/max(u),1/max(v))
-        return x
+        self.uv = x # uv as one complex number
+        u, v = np.real(x), np.imag(x)
+        u ,v = u - min(u),v - min(v)
+        self.uv_matrix = np.column_stack((u,v))*min(1/max(u),1/max(v))
 
-    def VisualizeParameterization3D(self, uv):
-        u, v = np.real(uv), np.imag(uv)
+    def VisualizeParameterization3D(self):
+        u, v = np.real(self.uv), np.imag(self.uv)
         u1,v1 = np.array([u[vj]-u[vi] for vi,vj in self.edges_unique]),np.array([v[vj]-v[vi] for vi,vj in self.edges_unique])
         fu1,fv1 = self.Whitney1Form(u1),self.Whitney1Form(v1)
         return fu1,fv1
@@ -370,23 +506,23 @@ class Mesh(trimesh.Trimesh):
         vu1,vv1 = vertex1f(fu1),vertex1f(fv1)
         return vu1,vv1
 
-    def VisualizeParameterization(self,uv):
+    def VisualizeParameterization(self):
         from matplotlib import pyplot as plt
-        u,v = np.real(uv),np.imag(uv)
+        u,v = np.real(self.uv),np.imag(self.uv)
         fig,ax = plt.subplots(1)
         ax.set_aspect('equal')
         for vi,vj in self.edges_unique:ax.plot([u[vi],u[vj]],[v[vi],v[vj]],linewidth=0.5)
         plt.show()
-    #------------------------------------------------- SCP -------------------------------------------------
 
-    #------------------------------------------------- Heat Method -------------------------------------------------
-    def HeatMethodGeodesics(self,pid):
+class HeatMethodGeodesic(Mesh):
+    # [@param] pid: which point do you want to compute geodesics from
+    def __init__(self,mesh,pid):
+        self.__dict__ = mesh.__dict__
         u0 = np.zeros(self.vn)
         u0[pid] = 1
         t = np.mean(self.edges_unique_length)**2
         I = sp.identity(self.vn, format='csr')
         u = sp.linalg.spsolve( I - t*self.L, u0)
-        # for i,g in enumerate(u):print(i,g)
 
         grad_u = np.zeros_like(self.faces).astype(float)
         for i,v in  enumerate(self.Vertexs):
@@ -402,20 +538,18 @@ class Mesh(trimesh.Trimesh):
                 x  = X[he.fi]
                 div_X[v.i]+=0.5*( np.dot(x,he.vector)*he.cotan + np.dot(x,-he.prev.vector)*he.prev.cotan)
 
-        geodesics =  sp.linalg.spsolve(self.Lc,div_X )
-        geodesics -= np.min(geodesics)
-        return geodesics
+        self.geodesics =  sp.linalg.spsolve(self.Lc,div_X )
+        self.geodesics -= np.min(self.geodesics)
 
-    def ISOLines(self,center_idx,stride=0.5):
+    def ISOLines(self,stride=0.5):
         import collections
         from math import ceil,floor
-        geodesics = self.HeatMethodGeodesics(center_idx)
         h = np.mean(self.edges_unique_length)*stride
         ret = []
         for f in self.faces:
             valuemap = collections.defaultdict(list)
             vtxpos = self.vertices[f]
-            vtxvalue = geodesics[f]
+            vtxvalue = self.geodesics[f]
             for i in range(3):
                 j = (i+1)%3
                 if vtxvalue[i]>vtxvalue[j]:i,j = j,i
@@ -428,151 +562,29 @@ class Mesh(trimesh.Trimesh):
                 assert(len(poss)==2)
                 ret.extend(poss[:])
         return np.array(ret)
-    #------------------------------------------------- Heat Method -------------------------------------------------
 
-    #------------------------------------------------- Hodge Decomposition -------------------------------------------------
-    def Random1Form(self):
-        scalar_potential = np.zeros(self.vn)
-        vector_potential = np.zeros(self.vn)
-        for _ in range(self.vn//500):
-            scalar_potential[np.random.choice(self.vn)] = 5000*np.random.rand()-2500
-            vector_potential[np.random.choice(self.vn)] = 5000 * np.random.rand() - 2500
-        scalar_potential = sp.linalg.spsolve(self.L,scalar_potential)
-        vector_potential = sp.linalg.spsolve(self.L,vector_potential)
-        face_omega = np.array([np.zeros(3) for _ in range(self.fn)])
-        for he in self.Halfedges:
-            if he.boundary:continue
-            A = self.area_faces[he.fi]
-            N = self.face_normals[he.fi]
-            counter_idx = he.next.v1.i
-            face_omega[he.fi] += scalar_potential[counter_idx]*np.cross(N,he.vector)/(2*A)
-            face_omega[he.fi] += vector_potential[counter_idx]*np.cross(N,np.cross(N,he.vector))/(2*A)
-        omega = np.zeros(self.en)
-        for i,(ei,ej) in enumerate(self.edges_unique):
-            he = self.IJ2HalfEdge[(ei,ej)]
-            if not he.boundary:         omega[i] += np.dot(he.vector,face_omega[he.fi])
-            if not he.twin.boundary:    omega[i] += np.dot(he.vector,face_omega[he.twin.fi])
-        return omega
-    def HodgeDecomposition(self,omega):
+class HodgeDecomposition(Mesh):
+    def __init__(self,mesh,omega = None):
+        self.__dict__ = mesh.__dict__
+        if omega is None: omega = self.Random1Form()
         assert len(omega)==self.en
         temp = self._x2@self._d1@self.x1
-        alpha = sp.linalg.spsolve(temp@self.d0,temp@omega)
-        beta  = sp.linalg.spsolve(self.d1@self._x1@self._d0 ,self.d1@omega)
-        beta  = sp.linalg.spsolve(self.x2,beta)
-        return alpha,beta
-    # get 1-form on circumcenter of triangle face
-    def Whitney1Form(self,oneform):
-        face1form = np.array([np.zeros(3) for _ in range(self.fn)])
-        for fi,idxs in enumerate(self.faces):
-            N = self.face_normals[fi]
-            A = self.area_faces[fi]
-            for _ in range(3):
-                i,j,k = idxs[_],idxs[(_+1)%3],idxs[(_+2)%3]
-                vi,vj,vk = self.vertices[i],self.vertices[j],self.vertices[k]
-                phi_ij = np.cross(N,(vi-vk) + (vj-vk))/(6*A)
-                if (i,j) in self.IJ2UniqueEdgeIdx: phi_ij *= oneform[self.IJ2UniqueEdgeIdx[(i,j)]]
-                else: phi_ij *= -oneform[self.IJ2UniqueEdgeIdx[(j,i)]]
-                face1form[fi] += phi_ij
-        return face1form
-    def HodgeDecompositionTest(self):
-        omega = self.Random1Form()
-        alpha,beta = self.HodgeDecomposition(omega)
-        face_alpha = self.Whitney1Form(self.d0@alpha)
-        face_beta = self.Whitney1Form( self._x1@self._d0@self.x2@beta)
-        return self.Whitney1Form(omega) ,face_alpha, face_beta
-    #------------------------------------------------- Hodge Decomposition -------------------------------------------------
+        self.alpha = sp.linalg.spsolve(temp@self.d0,temp@omega)
+        self.beta  = sp.linalg.spsolve(self.d1@self._x1@self._d0 ,self.d1@omega)
+        self.beta  = sp.linalg.spsolve(self.x2,self.beta)
+        self.face_omega = self.Whitney1Form(omega)
+        self.face_alpha = self.Whitney1Form(self.d0@self.alpha)
+        self.face_beta  = self.Whitney1Form(self._x1@self._d0@self.x2@self.beta)
 
-    #------------------------------------------------- Generators /Harmonic Bases -------------------------------------------------------------
-    def TreeCotree(self):
-        tree = [i for i in range(self.vn)]
-        root = [0]
-        while root != []:
-            parentId = root.pop(0)
-            for he in self.Vertexs[parentId].halfedges:
-                childId = he.v1.i
-                if childId == 0 or tree[childId] != childId : continue  # already processed
-                tree[childId] = parentId
-                root.append(childId)
-        cotree = [i for i in range(self.fn)]
-        root = [0]
-        while root != []:
-            parentId = root.pop(0)
-            for _ in range(3):
-                i0, i1 = self.faces[parentId][_], self.faces[parentId][(_ + 1) % 3]
-                he = self.IJ2HalfEdge[(i0, i1)]
-                if he.twin.boundary: continue
-                childId = he.twin.fi
-                if cotree[childId] != childId or childId==0 or tree[he.v0.i]==he.v1.i or tree[he.v1.i]==he.v0.i: continue  # already processed or cross tree
-                cotree[childId] = parentId
-                root.append(childId)
-        return tree,cotree
-    # each generator is a closed path that starts with x(face idx) and ends with x
-    def Generators(self):
-        def TraceToRoot(tree,i):
-            ret = [i]
-            while tree[ret[-1]]!=ret[-1]: ret.append(tree[ret[-1]])
-            return ret
-        tree,cotree = self.TreeCotree()
-        generators = []
-        for edge in self.edges_unique:
-            he = self.IJ2HalfEdge[(edge[0],edge[1])]
-            if he.boundary or he.twin.boundary: continue
-            fi,fj = he.fi,he.twin.fi
-            if cotree[fi] == fj or cotree[fj] == fi or tree[he.v0.i] == he.v1.i or tree[he.v1.i] == he.v0.i: continue
-            tracei,tracej = TraceToRoot(cotree,fi),TraceToRoot(cotree,fj)
-            lastCommon = -1
-            while tracei[-1]==tracej[-1]:
-                lastCommon = tracei.pop()
-                lastCommon = tracej.pop()
-            generators.append([lastCommon]+tracei[::-1]+tracej+[lastCommon])
-        return generators
-    def HarmonicBases(self):
-        def CommonEdge(fi,fj): #用一个来自fi的halfedge(有向边)来表示这个有向的generator
-            for i in range(3):
-                for j in range(3):
-                    if min(self.faces[fi][i],self.faces[fi][(i+1)%3])==min(self.faces[fj][j],self.faces[fj][(j+1)%3]) and max(self.faces[fi][i],self.faces[fi][(i+1)%3])==max(self.faces[fj][j],self.faces[fj][(j+1)%3]) :
-                        vi,vj = min(self.faces[fi][i],self.faces[fi][(i+1)%3]),max(self.faces[fi][i],self.faces[fi][(i+1)%3])
-                        if self.IJ2HalfEdge[(vi,vj)].fi==fi:return (vi,vj)
-                        else:                               return (vj,vi)
-        bases = []
-        for generator in self.Generators():
-            oneform = np.zeros(self.en)
-            for i in range(len(generator)-1):
-                fi,fj = generator[i],generator[i+1]
-                vi0,vi1 = CommonEdge(fi,fj)
-                if (vi0,vi1) not in self.IJ2UniqueEdgeIdx: oneform[self.IJ2UniqueEdgeIdx[(vi1,vi0)]]=-1
-                else:oneform[self.IJ2UniqueEdgeIdx[(vi0,vi1)]]=1
-            bases.append(oneform-self.d0@self.HodgeDecomposition(oneform)[0])
-        return bases
-
-    def VisualizeTreeCoTree(self):
-        tree,cotree = self.TreeCotree()
-        tree_lines = []
-        for i,j in enumerate(tree):tree_lines.extend([self.vertices[i],self.vertices[j]])
-        cotree_lines = []
-        for i,j in enumerate(cotree):cotree_lines.extend([self.triangles_center[i],self.triangles_center[j]])
-        return np.array(tree_lines+cotree_lines)
-    def VisualizeGenerators(self):
-        generators = self.Generators()
-        lines = []
-        for generator in generators:
-            for _i in range(len(generator)-1):
-                i,j  = generator[_i],generator[_i+1]
-                lines.extend([self.triangles_center[i],self.triangles_center[j]])
-        return np.array(lines)
-    def VisualizeHarmonicBases(self):
-        return [self.Whitney1Form(base) for base in self.HarmonicBases()]
-    #------------------------------------------------- Generators -------------------------------------------------------------
-
-    #------------------------------------------------- Vector Field Design -------------------------------------------------
-    def TrivialConnection(self):
+class TrivialConnection(Mesh):
+    def __init__(self,mesh):
+        self.__dict__ = mesh.__dict__
         k = np.zeros(self.vn)
-        # k[2]=k[3]=1
         for _ in range(self.euler_number): k[np.random.choice(self.vn)] += 1
         #注意,beta是dual 2-form
         beta = sp.linalg.spsolve(self.Lc@self._x2,2 * np.pi * k - self.vertex_defects)
-        generators = self.Generators()
-        bases = self.HarmonicBases()
+        # generators = self.Generators()
+        # bases = self.HarmonicBases()
         def IntegrateAlongGenerator(oneform,generator):
             ret = 0
             for he in generator:
@@ -592,16 +604,17 @@ class Mesh(trimesh.Trimesh):
             ret = []
             for i in range(len(generator)-1):ret.append(ConvertPair2HalfEdge(generator[i],generator[i+1]))
             return ret
-        generators = [Convert(generator)for generator in generators]
-        P = np.zeros((len(bases),len(generators)))
-        for i,base in enumerate(bases):
+        generators = [Convert(generator)for generator in self.generators]
+        P = np.zeros((len(self.harmonic_bases),len(self.generators)))
+        for i,base in enumerate(self.harmonic_bases):
             for j,gen in enumerate(generators):
                 P[i,j] = IntegrateAlongGenerator(base,gen)
         delta_beta = self.x1@self.d0@self._x2@beta
         z = np.linalg.solve(P,-np.array([IntegrateAlongGenerator(delta_beta,gen)for gen in generators]))
-        assert len(z) == len(generators) ==len(bases)
-        return delta_beta+np.sum(np.array([z[i]*bases[i]for i in range(len(bases))]),axis=0)
-    def VisualizeConnection(self,phi):
+        assert len(z) == len(generators) ==len(self.harmonic_bases)
+        self.phi = delta_beta+np.sum(np.array([z[i]*self.harmonic_bases[i]for i in range(len(self.harmonic_bases))]),axis=0)
+    @property
+    def parallel_vector(self):
         def FaceFrameField(fi):
             e = self.IJ2HalfEdge[(self.faces[fi][2], self.faces[fi][0])].vector
             e/=np.linalg.norm(e)
@@ -619,8 +632,8 @@ class Mesh(trimesh.Trimesh):
                 if cotree[he.twin.fi]!=he.twin.fi or he.twin.fi==0:continue
                 cotree[he.twin.fi] = fi
                 fidInProcess.append(he.twin.fi)
-                if (i,j) in self.IJ2UniqueEdgeIdx: phi_ = phi[self.IJ2UniqueEdgeIdx[(i,j)]]
-                else: phi_ = -phi[self.IJ2UniqueEdgeIdx[(j,i)]]
+                if (i,j) in self.IJ2UniqueEdgeIdx: phi_ = self.phi[self.IJ2UniqueEdgeIdx[(i,j)]]
+                else: phi_ = -self.phi[self.IJ2UniqueEdgeIdx[(j,i)]]
                 e0,e1 = face_frame_fields[fi]
                 d0,d1 = face_frame_fields[he.twin.fi]
                 fid2angle[he.twin.fi] = -phi_ + fid2angle[fi] - np.arctan2(np.dot(e1,he.vector),np.dot(e0,he.vector)) + np.arctan2(np.dot(d1,he.vector),np.dot(d0,he.vector))
@@ -630,8 +643,11 @@ class Mesh(trimesh.Trimesh):
             angle = fid2angle[fi]
             face_vector.append( e0*np.cos(angle)+e1*np.sin(angle))
         return np.array(face_vector)
-    # ============= Globally Optimal Direction Fields =============
-    def NDirectionField(self,n=1,Senergy=0):
+
+# ============= Globally Optimal Direction Fields =============
+class DirectionFields(Mesh):
+    def __init__(self,mesh,n,Senergy):
+        self.__dict__ = mesh.__dict__
         s = np.pi*2/(2*np.pi-self.vertex_defects)
         # 默认Vertex的halfedges[0]是basis section(Xi), thetas里存放着每个点对每个incident edge的夹角 (eij与Xi的夹角)
         # thetas = [[0]]*self.vn
@@ -688,8 +704,6 @@ class Mesh(trimesh.Trimesh):
             print(_,r)
             if r < 1e-10: break
         return x
-
-    #------------------------------------------------- Vector Field Design -------------------------------------------------
 
 # this class validates several identities or equations numerically
 class Validator:
@@ -750,4 +764,3 @@ if __name__ == '__main__':
     # print()
     # # Validator.Green_1st(Mesh(os.path.join(__file__, '..', 'input', 'quadx.obj')),2)
     Mesh(os.path.join(__file__, '..', 'input', 'quad-circle.obj'))
-

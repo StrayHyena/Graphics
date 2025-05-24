@@ -3,28 +3,30 @@ import polyscope as ps
 from MeshOperator import *
 
 def Main(testcase):
+    ObjPath = lambda objname: os.path.join(__file__, '..', 'input', objname+'.obj')
     if testcase == 'face':
         mesh = Mesh(os.path.join(__file__, '..', 'input', 'face.obj'))
-        data = {'Spectral Conformal Parameterization':mesh.SpectralConformalParameterization(ComplexAsVec2d=True)}
+        data = {'Spectral Conformal Parameterization':SpectralConformalParameterization(mesh).uv_matrix}
     if testcase == 'bunny':
         mesh = Mesh(os.path.join(__file__,'..','input','bunny.obj'))
-        omega,d_alpha,delta_beta = mesh.HodgeDecompositionTest()
-        omega,d_alpha,delta_beta = omega/np.linalg.norm(omega,axis=1).reshape(-1,1),d_alpha/np.linalg.norm(d_alpha,axis=1).reshape(-1,1),delta_beta/np.linalg.norm(delta_beta,axis=1).reshape(-1,1)
+        hd = HodgeDecomposition(mesh)
+        omega,d_alpha,delta_beta = hd.face_omega/np.linalg.norm(hd.face_omega,axis=1).reshape(-1,1),hd.face_alpha/np.linalg.norm(hd.face_alpha,axis=1).reshape(-1,1),hd.face_beta/np.linalg.norm(hd.face_beta,axis=1).reshape(-1,1)
         data = {
-            'ParallelVector ': mesh.VisualizeConnection(mesh.TrivialConnection()),
+            'ParallelVector ': TrivialConnection(mesh).parallel_vector,
             'HodgeDecomposition omega': omega,
             'HodgeDecomposition d_alpha': d_alpha,
             'HodgeDecomposition delta_beta': delta_beta,
-            'lines:geodesics contour':mesh.ISOLines(0,1.0),
+            'lines:geodesics contour':HeatMethodGeodesic(mesh,0).ISOLines(1.0),
         }
     if testcase == 'torus':
         mesh = Mesh(os.path.join(__file__,'..','input','torus.obj'))
+        mesh.harmonic_bases # this will trigger to compute tree,cotree and generators
         data = {
-            'lines:tree-cotree':mesh.VisualizeTreeCoTree(),
-            'lines:generators':mesh.VisualizeGenerators()
+            'lines:tree':mesh.tree_lines,
+            'lines:cotree':mesh.cotree_lines,
+            'lines:generators':mesh.generators_lines
         }
-        harmonicBases = mesh.VisualizeHarmonicBases()
-        for i,basis in enumerate(harmonicBases): data['HarmonicBasis'+str(i)]=basis
+        for i,basis in enumerate(mesh.harmonic_bases_on_face): data['HarmonicBasis'+str(i)]=basis
     # if testcase == QMC:
     #     mesh = Mesh(os.path.join(__file__, '..', 'input', 'quad-circle.obj'))
     #     data = {'':mesh.CrossField()}
