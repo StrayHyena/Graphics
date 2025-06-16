@@ -12,8 +12,8 @@ EPS = 1e-8
 class Constraint:
     @ti.data_oriented
     class EdgeStrecth:
-        def __init__(self,cloth,k):
-            self.n = len(cloth.edges_unique)  # how many constraints
+        def __init__(self,cloth,k,kd):
+            self.kd,self.n = kd,len(cloth.edges_unique)  # how many constraints
             self.ij = set()
             self.idx = ti.Vector.field(2, ti.i32, self.n)
             self.idx.from_numpy(cloth.edges_unique.astype(np.int32))
@@ -39,8 +39,8 @@ class Constraint:
 
     @ti.data_oriented
     class Pin:
-        def __init__(self,cloth,pins,k):
-            self.n = len(pins)  # how many constraints
+        def __init__(self,cloth,pins,k,kd):
+            self.kd,self.n = kd,len(pins)  # how many constraints
             self.ij = set([(i,i)for i in pins])
             self.idx = ti.field(ti.i32, self.n)
             self.idx.from_numpy(np.array(pins).astype(np.int32))
@@ -59,8 +59,8 @@ class Constraint:
 
     @ti.data_oriented
     class Bend:
-        def __init__(self,cloth,k):
-            edge_faces = {(min(i,j),max(i,j)):[]for i,j in cloth.edges_unique} # 这个边链接了哪些三角形
+        def __init__(self,cloth,k,kd):
+            self.kd,edge_faces = kd, {(min(i,j),max(i,j)):[]for i,j in cloth.edges_unique} # 这个边链接了哪些三角形
             for f in cloth.faces:
                 for i in range(3):
                     vi,vj = f[i],f[(i+1)%3]
@@ -137,9 +137,9 @@ class Simulator:
         self.faces.from_numpy(cloth.faces.astype(np.int32))
         self.external_force = ti.Vector.field(3,ti.f64,self.vn)
 
-        self.stretch = Constraint.EdgeStrecth(cloth,1e2)
-        self.bend = Constraint.Bend(cloth,0.01)
-        self.pin = Constraint.Pin(cloth,pins,1e4)
+        self.stretch = Constraint.EdgeStrecth(cloth,1e2,0)
+        self.bend = Constraint.Bend(cloth,0.01,0)
+        self.pin = Constraint.Pin(cloth,pins,1e4,0)
         # 一个关键的观察，一旦约束定下来了，稀疏hessian的ij项也就定下来了。
         self.ij = sorted(list(  set().union(*[con.ij for con in [self.stretch,self.bend, self.pin]])     ))  # 一个关键的观察，一旦约束定下来了，稀疏hessian的ij项也就定下来了。
         hessian_entry_num = len(self.ij)
@@ -162,10 +162,10 @@ class Simulator:
         for fi, f in enumerate(cloth.faces):
             for vi in f: vm[vi] += cloth.area_faces[fi]#/len(cloth.vertex_faces[vi])
         self.m.from_numpy(vm)
-        self.m_flatten = np.array([ m for m in vm for _ in range(3)])
 
     @ti.kernel
     def BuildLinearSystem(self):
+        h = ti.cast(self.h,ti.f64)
         self.b.fill(0)
         self.hess_entry_value.fill(0)
         # external force --------------------------------------------------------------------------
@@ -204,14 +204,12 @@ class Simulator:
                     j,pC_pxj = self.bend.idx[ci][j_],C_jacobi[j_]
                     ti.atomic_add(self.hess_entry_value[self.ij2entry_idx[i, j]], -k * (pC_pxi.outer_product(pC_pxj) + C_hess[ 4 * i_ + j_] * C))
         #  -------------------------- add b with h*pf_px*v --------------------------
-        for i,j in self.ij2entry_idx: ti.atomic_add(self.b[i], self.h * self.hess_entry_value[self.ij2entry_idx[i, j]] @ self.v[j])
+        for i,j in self.ij2entry_idx: ti.atomic_add(self.b[i], h * self.hess_entry_value[self.ij2entry_idx[i, j]] @ self.v[j])
         #  -----------------------------  Assemble Flatten Hessian  ---------------------------------------------
         for i, j in self.ij2entry_idx:
             entry_idx = self.ij2entry_idx[i, j]
-            for i_ in ti.static(range(3)):
-                for j_ in ti.static(range(3)):
-                    # self.hess_value_flatten[9*entry_idx + 3*i_ + j_] = -self.h*self.pf_pv[entry_idx][i_,j_] - self.h**2*self.pf_px[entry_idx][i_,j_] + (self.m[i] if i==j and i_==j_ else 0)
-                    self.hess_value_flatten[9*entry_idx + 3*i_ + j_] = self.hess_entry_value[entry_idx][i_,j_]
+            for i_, j_ in ti.static(ti.ndrange(3, 3)):
+                self.hess_value_flatten[9*entry_idx + 3*i_ + j_] = -h*self.hess_entry_value[entry_idx][i_,j_] + (self.m[i]/h if i==j and i_==j_ else 0)
 
     @ti.kernel
     def UpdateXAndV(self, dv: ti.types.ndarray()):
@@ -222,9 +220,8 @@ class Simulator:
 
     def Run(self):
         self.BuildLinearSystem()
-        pf_px = sp.coo_matrix((self.hess_value_flatten.to_numpy(), (self.hess_i_flatten, self.hess_j_flatten)), shape=(3 * self.vn, 3 * self.vn))
-        lhs = sp.spdiags(self.m_flatten, 0, 3 * self.vn, 3 * self.vn) - self.h ** 2 * pf_px
-        rhs = self.h * self.b.to_numpy().reshape(-1)
+        lhs = sp.coo_matrix((self.hess_value_flatten.to_numpy(), (self.hess_i_flatten, self.hess_j_flatten)), shape=(3 * self.vn, 3 * self.vn)).tocsr()
+        rhs = self.b.to_numpy().reshape(-1)   # 对于eq(6) 相当于左右同时除以h
         self.UpdateXAndV(sp.linalg.spsolve(lhs, rhs).reshape(self.vn, 3))
         return self
 
