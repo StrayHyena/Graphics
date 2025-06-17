@@ -121,7 +121,7 @@ class Constraint:
 @ti.data_oriented
 class Simulator:
     def __init__(self, clothobjpath, pins=[]):
-        self.h = 1 / 150
+        self.h = 1.0 / 150.0
         cloth = trimesh.load(clothobjpath)
         self.vn, self.en, self.fn = len(cloth.vertices), len(cloth.edges_unique), len(cloth.faces)
         self.uv = ti.Vector.field(2, ti.f64, self.vn)
@@ -137,15 +137,16 @@ class Simulator:
         self.faces.from_numpy(cloth.faces.astype(np.int32))
         self.external_force = ti.Vector.field(3,ti.f64,self.vn)
 
-        self.stretch = Constraint.EdgeStrecth(cloth,1e2,0)
-        self.bend = Constraint.Bend(cloth,0.01,0)
-        self.pin = Constraint.Pin(cloth,pins,1e4,0)
+        self.stretch = Constraint.EdgeStrecth(cloth,1e2,0.0001)
+        self.bend = Constraint.Bend(cloth,0.01,0.00001)
+        self.pin = Constraint.Pin(cloth,pins,1e4,0.1)
         # 一个关键的观察，一旦约束定下来了，稀疏hessian的ij项也就定下来了。
         self.ij = sorted(list(  set().union(*[con.ij for con in [self.stretch,self.bend, self.pin]])     ))  # 一个关键的观察，一旦约束定下来了，稀疏hessian的ij项也就定下来了。
         hessian_entry_num = len(self.ij)
         self.b = ti.Vector.field(3, ti.f64, self.vn)
         self.hess_entry_ij    = ti.Vector.field(2, ti.i32, hessian_entry_num)
-        self.hess_entry_value = ti.Matrix.field(3, 3, ti.f64, hessian_entry_num)
+        self.pf_px = ti.Matrix.field(3, 3, ti.f64, hessian_entry_num)
+        self.pf_pv = ti.Matrix.field(3, 3, ti.f64, hessian_entry_num)
         self.ij2entry_idx = ti.field(ti.i32)
         ti.root.dense(ti.i, self.vn).bitmasked(ti.j, self.vn).place(self.ij2entry_idx)
         self.hess_i_flatten = np.zeros(9*hessian_entry_num).astype(np.int32)
@@ -158,58 +159,62 @@ class Simulator:
                 self.hess_i_flatten[9 * entry_idx + 3 * i_ + j_] = 3 * i + i_
                 self.hess_j_flatten[9 * entry_idx + 3 * i_ + j_] = 3 * j + j_
 
-        vm = np.zeros(self.vn)  # 点的质量是incident的三角形面积和
-        for fi, f in enumerate(cloth.faces):
-            for vi in f: vm[vi] += cloth.area_faces[fi]#/len(cloth.vertex_faces[vi])
+        vm = 2*np.ones(self.vn)*cloth.area/self.vn
+        # vm = np.zeros(self.vn)  # 点的质量是incident的三角形面积和
+        # for fi, f in enumerate(cloth.faces):
+        #     for vi in f: vm[vi] += cloth.area_faces[fi]#/len(cloth.vertex_faces[vi])
         self.m.from_numpy(vm)
+        self.m_flatten = np.array([ m for m in vm for _ in range(3)])
 
     @ti.kernel
     def BuildLinearSystem(self):
         h = ti.cast(self.h,ti.f64)
         self.b.fill(0)
-        self.hess_entry_value.fill(0)
+        self.pf_px.fill(0)
+        self.pf_pv.fill(0)
         # external force --------------------------------------------------------------------------
         for i in range(self.vn):self.b[i] = self.m[i] * ti.math.vec3(0, -9.81, 0) + self.external_force[i]
-        # ------------------------------- PIN POINT -------------------------------------------
+        # ------------------------------- CONSTRAINTS -------------------------------------------
         for ci in self.pin.k:
-            i, l0, k = self.pin.idx[ci], self.pin.l0[ci], self.pin.k[ci]
+            i, l0, k,kd = self.pin.idx[ci], self.pin.l0[ci], self.pin.k[ci],self.pin.kd
             C,pC_pxi,ppC_pxipxi = Constraint.Pin.C_DC_DDC(self.x[i],l0)
             if -EPS < C < EPS: continue
-            Kii = -k * (pC_pxi.outer_product(pC_pxi) + ppC_pxipxi * C)
-            self.b[i] += -k * pC_pxi * C
-            self.hess_entry_value[self.ij2entry_idx[i, i]] += Kii
-        #  ----------------------------- EDGE STRETCH ---------------------------------------------
+            dotC = pC_pxi.dot(self.v[i])
+            self.b[i] += -k * pC_pxi * C  -kd * pC_pxi * dotC
+            self.pf_px[self.ij2entry_idx[i, i]] += -k * (pC_pxi.outer_product(pC_pxi) + ppC_pxipxi * C)  - kd*ppC_pxipxi*dotC
         for ci in self.stretch.k:
-            k = self.stretch.k[ci]
+            k,kd = self.stretch.k[ci],self.stretch.kd
             i, j = self.stretch.idx[ci]
             v = (self.v[i], self.v[j])
             C,C_jacobi,C_hess = Constraint.EdgeStrecth.C_DC_DDC(self.x[i], self.x[j],self.stretch.l0[ci])
             if -EPS < C < EPS: continue
             for i_ in ti.static(range(2)):
-                i,pC_pxi = self.stretch.idx[ci][i_],C_jacobi[i_]
-                ti.atomic_add(self.b[i], -k * pC_pxi * C)
+                i,pC_pxi,dotC = self.stretch.idx[ci][i_],C_jacobi[i_],C_jacobi[i_].dot(v[i_])
+                ti.atomic_add(self.b[i], -k * pC_pxi * C- kd * pC_pxi*dotC)
                 for j_ in ti.static(range(2)):
                     j,pC_pxj = self.stretch.idx[ci][j_],C_jacobi[j_]
-                    ti.atomic_add(self.hess_entry_value[self.ij2entry_idx[i, j]], -k * (pC_pxi.outer_product(pC_pxj) + C_hess[2*i_ + j_] * C))
+                    ti.atomic_add(self.pf_px[self.ij2entry_idx[i, j]], -k*pC_pxi.outer_product(pC_pxj)-C_hess[2*i_ + j_]*(k*C +kd*dotC) )  #))#)
+                    ti.atomic_add(self.pf_pv[self.ij2entry_idx[i, j]], -kd * pC_pxi.outer_product(pC_pxj))
         for ci in self.bend.k:
-            k = self.bend.k[ci]
+            k,kd = self.bend.k[ci],self.bend.kd
             i0,i1,i2,i3 = self.bend.idx[ci]
             v = (self.v[i0], self.v[i1],self.v[i2], self.v[i3])
             C,C_jacobi,C_hess = Constraint.Bend.C_DC_DDC(self.x[i0], self.x[i1],self.x[i2],self.x[i3],self.bend.l0[ci])
             if -EPS < C < EPS: continue
             for i_ in ti.static(range(4)):
-                i,pC_pxi = self.bend.idx[ci][i_],C_jacobi[i_]
+                i,pC_pxi,dotC = self.bend.idx[ci][i_],C_jacobi[i_],C_jacobi[i_].dot(v[i_])
                 ti.atomic_add(self.b[i], -k * pC_pxi * C)
                 for j_ in ti.static(range(4)):
                     j,pC_pxj = self.bend.idx[ci][j_],C_jacobi[j_]
-                    ti.atomic_add(self.hess_entry_value[self.ij2entry_idx[i, j]], -k * (pC_pxi.outer_product(pC_pxj) + C_hess[ 4 * i_ + j_] * C))
+                    ti.atomic_add(self.pf_px[self.ij2entry_idx[i, j]], -k*pC_pxi.outer_product(pC_pxj)-C_hess[4*i_ + j_]*(k*C +kd*dotC) )  #))#)
+                    ti.atomic_add(self.pf_pv[self.ij2entry_idx[i, j]], -kd*pC_pxi.outer_product(pC_pxj) )
         #  -------------------------- add b with h*pf_px*v --------------------------
-        for i,j in self.ij2entry_idx: ti.atomic_add(self.b[i], h * self.hess_entry_value[self.ij2entry_idx[i, j]] @ self.v[j])
+        for i,j in self.ij2entry_idx: ti.atomic_add(self.b[i], h * self.pf_px[self.ij2entry_idx[i, j]] @ self.v[j])
         #  -----------------------------  Assemble Flatten Hessian  ---------------------------------------------
         for i, j in self.ij2entry_idx:
             entry_idx = self.ij2entry_idx[i, j]
             for i_, j_ in ti.static(ti.ndrange(3, 3)):
-                self.hess_value_flatten[9*entry_idx + 3*i_ + j_] = -h*self.hess_entry_value[entry_idx][i_,j_] + (self.m[i]/h if i==j and i_==j_ else 0)
+                self.hess_value_flatten[9 * entry_idx + 3 * i_ + j_] = -self.h * self.pf_pv[entry_idx][i_, j_] - self.h ** 2 * self.pf_px[entry_idx][i_, j_] + (self.m[i] if i == j and i_ == j_ else 0)
 
     @ti.kernel
     def UpdateXAndV(self, dv: ti.types.ndarray()):
@@ -220,8 +225,8 @@ class Simulator:
 
     def Run(self):
         self.BuildLinearSystem()
+        rhs = self.h * self.b.to_numpy().reshape(-1)
         lhs = sp.coo_matrix((self.hess_value_flatten.to_numpy(), (self.hess_i_flatten, self.hess_j_flatten)), shape=(3 * self.vn, 3 * self.vn)).tocsr()
-        rhs = self.b.to_numpy().reshape(-1)   # 对于eq(6) 相当于左右同时除以h
         self.UpdateXAndV(sp.linalg.spsolve(lhs, rhs).reshape(self.vn, 3))
         return self
 
