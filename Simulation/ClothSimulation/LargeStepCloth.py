@@ -133,14 +133,14 @@ class Simulator:
         self.v = ti.Vector.field(3, ti.f64, self.vn)
         self.v.from_numpy(np.zeros_like(cloth.vertices))
         self.m = ti.field(ti.f64, self.vn)
+        self.m.from_numpy(2*np.ones(self.vn)*cloth.area/self.vn)
         self.faces = ti.Vector.field(3, ti.i32, self.fn)
         self.faces.from_numpy(cloth.faces.astype(np.int32))
         self.external_force = ti.Vector.field(3,ti.f64,self.vn)
 
-        self.stretch = Constraint.EdgeStrecth(cloth,1e2,0.0001)
+        self.stretch = Constraint.EdgeStrecth(cloth,1e4,0.0001)
         self.bend = Constraint.Bend(cloth,0.01,0.00001)
         self.pin = Constraint.Pin(cloth,pins,1e4,0.1)
-        # 一个关键的观察，一旦约束定下来了，稀疏hessian的ij项也就定下来了。
         self.ij = sorted(list(  set().union(*[con.ij for con in [self.stretch,self.bend, self.pin]])     ))  # 一个关键的观察，一旦约束定下来了，稀疏hessian的ij项也就定下来了。
         hessian_entry_num = len(self.ij)
         self.b = ti.Vector.field(3, ti.f64, self.vn)
@@ -158,13 +158,6 @@ class Simulator:
             for i_, j_ in ((i, j) for i in range(3) for j in range(3)):
                 self.hess_i_flatten[9 * entry_idx + 3 * i_ + j_] = 3 * i + i_
                 self.hess_j_flatten[9 * entry_idx + 3 * i_ + j_] = 3 * j + j_
-
-        vm = 2*np.ones(self.vn)*cloth.area/self.vn
-        # vm = np.zeros(self.vn)  # 点的质量是incident的三角形面积和
-        # for fi, f in enumerate(cloth.faces):
-        #     for vi in f: vm[vi] += cloth.area_faces[fi]#/len(cloth.vertex_faces[vi])
-        self.m.from_numpy(vm)
-        self.m_flatten = np.array([ m for m in vm for _ in range(3)])
 
     @ti.kernel
     def BuildLinearSystem(self):
@@ -217,10 +210,10 @@ class Simulator:
                 self.hess_value_flatten[9 * entry_idx + 3 * i_ + j_] = -self.h * self.pf_pv[entry_idx][i_, j_] - self.h ** 2 * self.pf_px[entry_idx][i_, j_] + (self.m[i] if i == j and i_ == j_ else 0)
 
     @ti.kernel
-    def UpdateXAndV(self, dv: ti.types.ndarray()):
-        for i in range(self.vn):
-            self.v[i] += ti.math.vec3(dv[i, 0], dv[i, 1], dv[i, 2])
-            self.x[i] += self.h * self.v[i]
+    def UpdateXAndV(self, dv: ti.types.ndarray(dtype=ti.math.vec3,ndim=1)):
+        for I in ti.grouped(dv):
+            self.v[I] += dv[I]
+            self.x[I] += self.h * self.v[I]
         self.external_force.fill(0)
 
     def Run(self):
