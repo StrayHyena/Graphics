@@ -1,13 +1,13 @@
 import numpy as np
 import polyscope as ps
-import polyscope.imgui as psim
-import trimesh
-import scipy.sparse as sp
-import time
 import taichi as ti
+import polyscope.imgui as psim
+import scipy.sparse as sp
+import trimesh,time
 
-ti.init(arch=ti.cpu)
-EPS = 1e-8
+ti.init(arch=ti.cpu,default_fp=ti.f64)
+EPS,MAX = 1e-8,1.7976931348623157e+308
+vec3,vec2,mat2,vec3i = ti.math.vec3,ti.math.vec2,ti.math.mat2,ti.math.ivec3
 
 class Constraint:
     @ti.data_oriented
@@ -88,8 +88,7 @@ class Constraint:
             self.k = ti.field(ti.f64, self.n)
             self.k.fill(k)
 
-        @ti.func
-        #  x index is conform with the ref paper: Derivation of discrete bending forces and their gradients
+        @ti.func     #  x index is conform with the ref paper: Derivation of discrete bending forces and their gradients
         def C_DC_DDC(x0,x1,x2,x3,l0): # constraint, derivative of constraint, 2nd derivative of constraint
             e0,e1,e2,e3,e4 = x1-x0,x2-x0,x3-x0,x2-x1,x3-x1  # Figure 1
             e0l = e0.norm()
@@ -119,15 +118,130 @@ class Constraint:
                  )
 
 @ti.data_oriented
+class Collision:
+    @ti.dataclass
+    class AABB:
+        bmin: vec3
+        bmax: vec3
+        @ti.func
+        def EatPoint(self, pos: vec3):
+            self.bmax, self.bmin = ti.math.max(self.bmax, pos), ti.math.min(self.bmin, pos)
+            return self
+        @ti.func
+        def EatAABB(self, box): return self.EatPoint(box.bmin).EatPoint(box.bmax)
+
+    @ti.func
+    def IJK2TableI(self,ijk):return (73856093*ijk[0]^19349663*ijk[1]^83492791*ijk[2])%self.tablesize
+
+    @ti.kernel
+    def ResetAABBs(self):
+        for i in self.vAABBs:self.vAABBs[i] = self.AABB(bmin = vec3(MAX),bmax = -vec3(MAX))
+        for i in self.eAABBs:self.eAABBs[i] = self.AABB(bmin = vec3(MAX),bmax = -vec3(MAX))
+        for i in self.fAABBs:self.fAABBs[i] = self.AABB(bmin = vec3(MAX),bmax = -vec3(MAX))
+
+    def __init__(self,cloth,tablesize=2039,element_num_per_cell=256,thickness=0.01):
+        self.tablesize,self.h,self.enpc = tablesize,thickness,element_num_per_cell
+        self.vn,self.en,self.fn = len(cloth.vertices),len(cloth.edges_unique),len(cloth.faces)
+        self.edges = ti.Vector.field(2,ti.i32,self.en)
+        self.edges.from_numpy(cloth.edges_unique.astype(np.int32))
+        self.faces = ti.Vector.field(3,ti.i32,self.fn)
+        self.faces.from_numpy(cloth.faces.astype(np.int32))
+        self.vAABBs = self.AABB.field(shape = self.vn)
+        self.eAABBs = self.AABB.field(shape = self.en)
+        self.fAABBs = self.AABB.field(shape = self.fn)
+
+        self.cellf = ti.field(ti.i32)   #  face(triangle index) in spatial cell
+        self.cellfnode = ti.root.pointer(ti.i,tablesize).dense(ti.j,element_num_per_cell)
+        self.cellfnode.place(self.cellf)
+        self.cellfn = ti.field(ti.i32,tablesize)  # how many current faces at each table entry ?
+        self.celle = ti.field(ti.i32)  #  edge(edge index) in spatial cell
+        self.cellenode = ti.root.pointer(ti.i,tablesize).dense(ti.j,element_num_per_cell)
+        self.cellenode.place(self.celle)
+        self.cellen = ti.field(ti.i32,tablesize)
+
+        self.vf = ti.Vector.field(3,ti.f64)           # vf pairs' barycentric coordinate where actual collisions occur
+        self.vfnode = ti.root.pointer(ti.i,self.vn).bitmasked(ti.j,self.fn) # use this sparse structure to remove repeated pair from broad phase
+        self.vfnode.place(self.vf)
+        self.ee = ti.Vector.field(2,ti.f64)
+        self.eenode = ti.root.pointer(ti.i,self.en).bitmasked(ti.j,self.en)
+        self.eenode.place(self.ee)
+
+    def HandleDiscrete(self,x,v):
+        self.ResetAABBs()
+        self.cellfn.fill(0)
+        self.cellen.fill(0)
+        self.cellfnode.deactivate_all()
+        self.cellenode.deactivate_all()
+        self.vfnode.deactivate_all()
+        self.eenode.deactivate_all()
+        self.HandleDiscrete_(x,v)
+
+    @ti.kernel
+    def HandleDiscrete_(self,x:ti.template(),v:ti.template()):
+        eCellSize,fCellSize = -vec3(MAX),-vec3(MAX)
+        for vi in x:self.vAABBs[vi].EatPoint(x[vi]) # result in : bmin == bmax = self.x[vi]
+        for ei in self.edges:
+            vi,vj = self.edges[ei]
+            self.eAABBs[ei].EatPoint(x[vi]).EatPoint(x[vj])
+            boxsize = self.eAABBs[ei].bmax-self.eAABBs[ei].bmin
+            for i in ti.static(range(3)): ti.atomic_max(eCellSize[i],boxsize[i])
+        for fi in self.faces:
+            vi,vj,vk = self.faces[fi]
+            self.fAABBs[fi].EatPoint(x[vi]).EatPoint(x[vj]).EatPoint(x[vk])
+            boxsize = self.fAABBs[fi].bmax-self.fAABBs[fi].bmin
+            for i in ti.static(range(3)): ti.atomic_max(fCellSize[i],boxsize[i])
+        for fi in self.fAABBs:
+            st,ed = ti.floor(self.fAABBs[fi].bmin/fCellSize).cast(ti.i32),ti.floor(self.fAABBs[fi].bmax/fCellSize).cast(ti.i32)
+            for i0,i1,i2 in ti.ndrange(st[0]-ed[0]+1,st[1]-ed[1]+1,st[2]-ed[2]+1):
+                i = self.IJK2TableI(st+vec3i(i0,i1,i2))
+                self.cellf[i,ti.atomic_add(self.cellfn[i],1)] = fi
+                if self.cellfn[i]>=self.enpc:print('cell too many faces ',self.cellfn[i])
+        for vi in x:
+            i,x4 = self.IJK2TableI(ti.floor(x[vi]/fCellSize).cast(ti.i32)),x[vi]
+            for fii in range(self.cellfn[i]):
+                fi = self.cellf[i,fii]
+                x1,x2,x3 = x[self.faces[fi][0]],x[self.faces[fi][1]],x[self.faces[fi][2]]
+                x13,x23,x43 = x1-x3,x2-x3,x4-x3
+                n = x13.cross(x23).normalized()
+                if x43.dot(n)>self.h: continue
+                w = mat2([(x13.dot(x13),x13.dot(x23)),(x13.dot(x23),x23.dot(x23))]).inverse()@vec2(x13.dot(x43),x23.dot(x43))  # page(4) eq(1)
+                d = self.h/ti.math.max(x13.norm(),x23.norm(),(x1-x2).norm())
+                if -d<w[0]<1+d and -d<w[1]<1+d and -d<w.sum()<1+d : self.vf[vi,fi] = vec3(w[0],w[1],1-w.sum())
+        for ei in self.eAABBs:
+            st,ed = ti.floor(self.eAABBs[ei].bmin/eCellSize).cast(ti.i32),ti.floor(self.eAABBs[ei].bmax/eCellSize).cast(ti.i32)
+            for i0,i1,i2 in ti.ndrange(st[0]-ed[0]+1,st[1]-ed[1]+1,st[2]-ed[2]+1):
+                i = self.IJK2TableI(st+vec3i(i0,i1,i2))
+                self.celle[i,ti.atomic_add(self.cellen[i],1)] = ei
+                if self.cellen[i] >= self.enpc: print('cell too many edges ', self.cellen[i])
+        for i in self.cellen:
+            for ei0_ in range(self.cellen[i]):
+                ei0 = self.celle[i,ei0_]
+                x1,x2 = x[self.edges[ei0][0]],x[self.edges[ei0][1]]
+                for ei1_ in range(ei0_):
+                    ei1 = self.celle[i, ei1_]
+                    x3, x4 = x[self.edges[ei1][0]], x[self.edges[ei1][1]]
+                    x21,x31,x43 = x2-x1,x3-x1,x4-x3
+                    if x21.cross(x43).norm()<EPS  : # ei0,ei1 parallel
+                        if x31.cross(x21).norm()/x21.norm()<self.h: self.ee[ei0,ei1] = vec2(0.5)  # 平行四边形的面积等于底乘高
+                        continue
+                    w = mat2([(x21.dot(x21),-x21.dot(x43)),(-x21.dot(x43),x43.dot(x43))]).inverse()@vec2(x21.dot(x31),-x43.dot(x31))  # page(4) eq(2)
+                    if 0<=w[0]<=1 and 0<=w[1]<=1: self.ee[ei0,ei1] = w
+        # Now Apply Repulsion
+        for vi,fi in self.vf:
+            x1,x2,x3,x4 = x[self.faces[fi][0]],x[self.faces[fi][1]],x[self.faces[fi][2]],x[vi]
+            w = self.vf[vi,fi]
+            xp,vp = vec3(0),vec3(0)
+            for i in ti.static(range(3)):
+                xp+= x[self.faces[fi][i]]*w[i]
+                vp+= v[self.faces[fi][i]]*w[i]
+            n = (x4-xp).normalized()
+
+@ti.data_oriented
 class Simulator:
     def __init__(self, clothobjpath, pins=[]):
         self.h = 1.0 / 150.0
         cloth = trimesh.load(clothobjpath)
         self.vn, self.en, self.fn = len(cloth.vertices), len(cloth.edges_unique), len(cloth.faces)
-        self.uv = ti.Vector.field(2, ti.f64, self.vn)
-        self.uv.from_numpy(cloth.visual.uv)
-        self.x0 = ti.Vector.field(3, ti.f64, self.vn)
-        self.x0.from_numpy(cloth.vertices)
         self.x = ti.Vector.field(3, ti.f64, self.vn)
         self.x.from_numpy(cloth.vertices)
         self.v = ti.Vector.field(3, ti.f64, self.vn)
@@ -139,8 +253,8 @@ class Simulator:
         self.external_force = ti.Vector.field(3,ti.f64,self.vn)
 
         self.stretch = Constraint.EdgeStrecth(cloth,1e4,0.0001)
-        self.bend = Constraint.Bend(cloth,0.01,0.00001)
-        self.pin = Constraint.Pin(cloth,pins,1e4,0.1)
+        self.bend    = Constraint.Bend(cloth,0.001,0.00000)
+        self.pin     = Constraint.Pin(cloth,pins,1e4,0.1)
         self.ij = sorted(list(  set().union(*[con.ij for con in [self.stretch,self.bend, self.pin]])     ))  # 一个关键的观察，一旦约束定下来了，稀疏hessian的ij项也就定下来了。
         hessian_entry_num = len(self.ij)
         self.b = ti.Vector.field(3, ti.f64, self.vn)
@@ -159,6 +273,8 @@ class Simulator:
                 self.hess_i_flatten[9 * entry_idx + 3 * i_ + j_] = 3 * i + i_
                 self.hess_j_flatten[9 * entry_idx + 3 * i_ + j_] = 3 * j + j_
 
+        self.collision_handler = Collision(cloth)
+
     @ti.kernel
     def BuildLinearSystem(self):
         h = ti.cast(self.h,ti.f64)
@@ -166,15 +282,15 @@ class Simulator:
         self.pf_px.fill(0)
         self.pf_pv.fill(0)
         # external force --------------------------------------------------------------------------
-        for i in range(self.vn):self.b[i] = self.m[i] * ti.math.vec3(0, -9.81, 0) + self.external_force[i]
+        for i in range(self.vn):self.b[i] = self.m[i] * vec3(0, -9.81, 0) + self.external_force[i]
         # ------------------------------- CONSTRAINTS -------------------------------------------
         for ci in self.pin.k:
             i, l0, k,kd = self.pin.idx[ci], self.pin.l0[ci], self.pin.k[ci],self.pin.kd
             C,pC_pxi,ppC_pxipxi = Constraint.Pin.C_DC_DDC(self.x[i],l0)
             if -EPS < C < EPS: continue
             dotC = pC_pxi.dot(self.v[i])
-            self.b[i] += -k * pC_pxi * C  -kd * pC_pxi * dotC
-            self.pf_px[self.ij2entry_idx[i, i]] += -k * (pC_pxi.outer_product(pC_pxi) + ppC_pxipxi * C)  - kd*ppC_pxipxi*dotC
+            self.b[i] = -k * pC_pxi * C  -kd * pC_pxi * dotC
+            self.pf_px[self.ij2entry_idx[i, i]] = -k * (pC_pxi.outer_product(pC_pxi) + ppC_pxipxi * C)  - kd*ppC_pxipxi*dotC
         for ci in self.stretch.k:
             k,kd = self.stretch.k[ci],self.stretch.kd
             i, j = self.stretch.idx[ci]
@@ -183,11 +299,11 @@ class Simulator:
             if -EPS < C < EPS: continue
             for i_ in ti.static(range(2)):
                 i,pC_pxi,dotC = self.stretch.idx[ci][i_],C_jacobi[i_],C_jacobi[i_].dot(v[i_])
-                ti.atomic_add(self.b[i], -k * pC_pxi * C- kd * pC_pxi*dotC)
+                self.b[i]+= -k * pC_pxi * C- kd * pC_pxi*dotC
                 for j_ in ti.static(range(2)):
                     j,pC_pxj = self.stretch.idx[ci][j_],C_jacobi[j_]
-                    ti.atomic_add(self.pf_px[self.ij2entry_idx[i, j]], -k*pC_pxi.outer_product(pC_pxj)-C_hess[2*i_ + j_]*(k*C +kd*dotC) )  #))#)
-                    ti.atomic_add(self.pf_pv[self.ij2entry_idx[i, j]], -kd * pC_pxi.outer_product(pC_pxj))
+                    self.pf_px[self.ij2entry_idx[i, j]] += -k*pC_pxi.outer_product(pC_pxj)-C_hess[2*i_ + j_]*(k*C +kd*dotC)   #))#)
+                    self.pf_pv[self.ij2entry_idx[i, j]] += -kd*pC_pxi.outer_product(pC_pxj)
         for ci in self.bend.k:
             k,kd = self.bend.k[ci],self.bend.kd
             i0,i1,i2,i3 = self.bend.idx[ci]
@@ -196,13 +312,13 @@ class Simulator:
             if -EPS < C < EPS: continue
             for i_ in ti.static(range(4)):
                 i,pC_pxi,dotC = self.bend.idx[ci][i_],C_jacobi[i_],C_jacobi[i_].dot(v[i_])
-                ti.atomic_add(self.b[i], -k * pC_pxi * C)
+                self.b[i] += -k * pC_pxi * C - kd * pC_pxi*dotC
                 for j_ in ti.static(range(4)):
                     j,pC_pxj = self.bend.idx[ci][j_],C_jacobi[j_]
-                    ti.atomic_add(self.pf_px[self.ij2entry_idx[i, j]], -k*pC_pxi.outer_product(pC_pxj)-C_hess[4*i_ + j_]*(k*C +kd*dotC) )  #))#)
-                    ti.atomic_add(self.pf_pv[self.ij2entry_idx[i, j]], -kd*pC_pxi.outer_product(pC_pxj) )
+                    self.pf_px[self.ij2entry_idx[i, j]] += -k*pC_pxi.outer_product(pC_pxj)-C_hess[4*i_ + j_]*(k*C +kd*dotC)   #))#)
+                    self.pf_pv[self.ij2entry_idx[i, j]] += -kd*pC_pxi.outer_product(pC_pxj)
         #  -------------------------- add b with h*pf_px*v --------------------------
-        for i,j in self.ij2entry_idx: ti.atomic_add(self.b[i], h * self.pf_px[self.ij2entry_idx[i, j]] @ self.v[j])
+        for i,j in self.ij2entry_idx: self.b[i] += h * self.pf_px[self.ij2entry_idx[i, j]] @ self.v[j]
         #  -----------------------------  Assemble Flatten Hessian  ---------------------------------------------
         for i, j in self.ij2entry_idx:
             entry_idx = self.ij2entry_idx[i, j]
@@ -210,30 +326,37 @@ class Simulator:
                 self.hess_value_flatten[9 * entry_idx + 3 * i_ + j_] = -self.h * self.pf_pv[entry_idx][i_, j_] - self.h ** 2 * self.pf_px[entry_idx][i_, j_] + (self.m[i] if i == j and i_ == j_ else 0)
 
     @ti.kernel
-    def UpdateXAndV(self, dv: ti.types.ndarray(dtype=ti.math.vec3,ndim=1)):
-        for I in ti.grouped(dv):
-            self.v[I] += dv[I]
-            self.x[I] += self.h * self.v[I]
-        self.external_force.fill(0)
-
+    def UpdateV(self, dv: ti.types.ndarray(dtype=vec3,ndim=1)):
+        for I in ti.grouped(dv): self.v[I] += dv[I]
+    @ti.kernel
+    def UpdateX(self):
+        for i in self.x: self.x[i] += self.h * self.v[i]
     def Run(self):
         self.BuildLinearSystem()
         rhs = self.h * self.b.to_numpy().reshape(-1)
         lhs = sp.coo_matrix((self.hess_value_flatten.to_numpy(), (self.hess_i_flatten, self.hess_j_flatten)), shape=(3 * self.vn, 3 * self.vn)).tocsr()
-        self.UpdateXAndV(sp.linalg.spsolve(lhs, rhs).reshape(self.vn, 3))
+        self.UpdateV(sp.linalg.spsolve(lhs, rhs).reshape(self.vn, 3))
+        self.UpdateX()
+        self.external_force.fill(0)
+        # self.collision_handler.HandleDiscrete(self.x,self.v)
         return self
 
 def Main(testcase):
+    for k in dir(ti.linalg): print(k)
+    exit()
     simulator = Simulator(testcase, [1, ])
+    ps.init()
     ps.set_warn_for_invalid_values(True)
     ps.set_ground_plane_mode('none')
     ps.set_background_color((0.5, 0.5, 0.5))
     ps.set_shadow_darkness(0.75)
-    ps.init()
     ps.look_at((1.5, 0.2, 1.5), (0., -0.5, 0.5))
     ps_mesh = ps.register_surface_mesh("cloth", simulator.x.to_numpy(), simulator.faces.to_numpy(),color=(0.13333333, 0.44705882, 0.76470588))
+    ps_mesh.set_back_face_color((84/255, 120/255, 161/255))
+    ps_mesh.set_back_face_policy('custom')
+    # for k in dir(type(ps_mesh)):print(k)
+    # exit(0)
     ps_mesh.set_edge_width(1.0)
-    i = 0
     io = psim.GetIO()
     while not io.KeyCtrl:
         # if io.MouseClicked[2]:
@@ -241,9 +364,8 @@ def Main(testcase):
         #     if picker.is_hit:
         #         print(picker.structure_data['index'],picker.local_index )
         #         for k,v in picker.structure_data.items():print(k,v)
-        #         simulator.external_force[picker.structure_data['index']] = ti.math.vec3(0,1,0)
+        #         simulator.external_force[picker.structure_data['index']] = vec3(0,1,0)
         ps_mesh.update_vertex_positions(simulator.Run().x.to_numpy())
         ps.frame_tick()
-        i += 1
 
 Main('./assets/quad01.obj')
