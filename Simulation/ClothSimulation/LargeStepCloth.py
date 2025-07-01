@@ -117,7 +117,6 @@ class Constraint:
            (cos4*n2_.outer_product(m02_)-m4_.outer_product(n2_))/(h02*h4),(cos4*n2_.outer_product(m02_)-m2_.outer_product(n2_))/(h02*h2),0,-(m02_.outer_product(n2_)+n2_.outer_product(m02_))/h02**2   # page 21
                  )
 
-
 # There are three types of Constraints.
 # A. 【Material】Material-related, e.g. bend,edge stretch, which are decided by the cloth geometry
 # B. 【CustomConstraint】User-defined constraint, e.g. pin point, stitch points
@@ -243,11 +242,10 @@ class Collision:
                 vp+= v[self.faces[fi][i]]*w[i]
             n = (x4-xp).normalized()
 
-
 @ti.data_oriented
 class Material:
-    def __init__(self,cloth,fieldx,fieldv,pins=[]):
-        self.vn,self.x,self.v = len(cloth.vertices),fieldx,fieldv  # fieldx,fieldv is a taichi field reference
+    def __init__(self,cloth):
+        self.vn = len(cloth.vertices)
         self.stretch = Constraint.EdgeStrecth(cloth, 1e4, 0.0000)
         self.bend = Constraint.Bend(cloth, 0.001, 0.00000)
         self.ij = sorted(list(  set().union(*[con.ij for con in [self.stretch,self.bend]])     ))  # 一个关键的观察，一旦约束定下来了，稀疏hessian的ij项也就定下来了。
@@ -278,8 +276,8 @@ class Material:
         for ci in self.bend.k:
             k, kd = self.bend.k[ci], self.bend.kd
             i0, i1, i2, i3 = self.bend.idx[ci]
-            v = (self.v[i0], self.v[i1], self.v[i2], self.v[i3])
-            C, C_jacobi, C_hess = Constraint.Bend.C_DC_DDC(self.x[i0], self.x[i1], self.x[i2], self.x[i3],self.bend.l0[ci])
+            v = (V[i0], V[i1], V[i2], V[i3])
+            C, C_jacobi, C_hess = Constraint.Bend.C_DC_DDC(X[i0], X[i1], X[i2], X[i3],self.bend.l0[ci])
             if -EPS < C < EPS: continue
             for i_ in ti.static(range(4)):
                 i, pC_pxi, dotC = self.bend.idx[ci][i_], C_jacobi[i_], C_jacobi[i_].dot(v[i_])
@@ -292,8 +290,8 @@ class Material:
 # Only support pin now
 @ti.data_oriented
 class CustomConstraint:
-    def __init__(self,cloth,pins,fieldx,fieldv):
-        self.vn,self.x,self.v = len(cloth.vertices),fieldx,fieldv  # fieldx,fieldv is a taichi field reference
+    def __init__(self,cloth,pins):
+        self.vn= len(cloth.vertices)
         self.pin     = Constraint.Pin(cloth,pins,1e4,0.1)
         self.f = ti.Vector.field(3, ti.f64, self.vn)
         self.pf_px = ti.Matrix.field(3, 3, ti.f64)
@@ -315,7 +313,6 @@ class CustomConstraint:
             self.pf_px[i] = -k * (pC_pxi.outer_product(pC_pxi) + ppC_pxipxi * C) - kd * ppC_pxipxi * dotC
             self.pf_pv[i] = -kd * pC_pxi.outer_product(pC_pxi)
 
-
 @ti.data_oriented
 class Simulator:
     def __init__(self, clothobjpath, pins=[]):
@@ -332,8 +329,8 @@ class Simulator:
         self.faces.from_numpy(cloth.faces.astype(np.int32))
         self.external_force = ti.Vector.field(3,ti.f64,self.vn)
 
-        self.material = Material(cloth,self.x,self.v)
-        self.constraints = CustomConstraint(cloth,pins,self.x,self.v)
+        self.material = Material(cloth)
+        self.constraints = CustomConstraint(cloth,pins)
         # self.collision = Collision(cloth)
         self.b = ti.Vector.field(3, ti.f64, self.vn)
         self.A = ti.Matrix.field(3, 3, ti.f64)
