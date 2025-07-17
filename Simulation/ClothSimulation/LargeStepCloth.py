@@ -9,6 +9,7 @@ ti.init(arch=ti.cpu,default_fp=ti.f64)
 EPS,MAX = 1e-8,1.7976931348623157e+308
 I3,O3 = ti.math.mat3([[1,0,0],[0,1,0],[0,0,1]]),ti.math.mat3([[0,0,0],[0,0,0],[0,0,0]])
 vec3,vec2,mat2,vec3i = ti.math.vec3,ti.math.vec2,ti.math.mat2,ti.math.ivec3
+nan,inf = ti.math.nan,ti.math.inf
 
 class Constraint:
     @ti.data_oriented
@@ -140,6 +141,31 @@ class Constraint:
 
 @ti.data_oriented
 class Collision:
+    @ti.func
+    def quadratic_root(a: ti.f64, b: ti.f64, c: ti.f64):
+        count, x0, x1, d = 0, nan, nan, b * b - 4 * a * c
+        if d >= 0: count, x0, x1 = 2, 0 if c == 0 else -2 * c / (b + ti.math.sign(b) * ti.sqrt(d)), -(b + ti.math.sign(b) * ti.sqrt(d)) / (2 * a)
+        return 1 if 0 <= d < EPS or -EPS < a < EPS else count, ti.min(x0, x1), ti.max(x0, x1)
+
+    @ti.func
+    def cubic_root(a: ti.f64, b: ti.f64, c: ti.f64, d: ti.f64):
+        count, x0, x1, x2, i = 0, nan, nan, nan, 0
+        qcount, s0, s1 = Collision.quadratic_root(3 * a, 2 * b, c)
+        fs0, fs1, r = a * s0 ** 3 + b * s0 ** 2 + c * s0 + d, a * s1 ** 3 + b * s1 ** 2 + c * s1 + d, 1e-3
+        if qcount <= 1:   count, x0 = 1, -b / 3 / a - ti.math.sign(a) * r  # 全实数域严格单调
+        if qcount == 2:  # 全实数域三段单调
+            if fs0 * fs1 > 0:count, x0 = 1, (s0 - r) if fs0 * a > 0 else (s1 + r)  # 全实数域只有一个实根，要么在 [-∞,s0] 要么在 [s1,+∞]
+            else:count, x0 = 3, (s0 + s1) / 2  # 全实数域有仨实根,有可能有俩实根相同
+        while i < 15:
+            f, i = a * x0 ** 3 + b * x0 ** 2 + c * x0 + d, i + 1
+            if abs(f) < 1e-8: break
+            df = 3 * a * x0 ** 2 + 2 * b * x0 + c
+            x0 -= f / df
+        if count == 3:  # 这个值在三个根中是中间的那个
+            x1 = x0
+            qcount, x0, x2 = Collision.quadratic_root(a, b + a * x1, c + (b + a * x1) * x1)
+        return count, x0, x1, x2
+
     @ti.dataclass
     class AABB:
         bmin: vec3
@@ -196,77 +222,78 @@ class Collision:
         for ei0,ei1 in self.ee:print(self.edges[ei0][0],self.edges[ei0][1],self.edges[ei1][0],self.edges[ei1][1],self.ee[ei0,ei1])
         for vi in self.f: print(vi,self.f[vi])
 
-    @ti.kernel
-    def Update(self,x:ti.template(),v:ti.template()):
+    @ti.kernel  # x: current position  y: next position
+    def CollectCollisionPairs(self,x:ti.template(),y:ti.template(),is_continuous:bool):
+        # clear cells -----------------------------------------------------------------------------------
         for i in self.vAABBs:self.vAABBs[i] = self.AABB(bmin = vec3(MAX),bmax = -vec3(MAX))
         for i in self.eAABBs:self.eAABBs[i] = self.AABB(bmin = vec3(MAX),bmax = -vec3(MAX))
         for i in self.fAABBs:self.fAABBs[i] = self.AABB(bmin = vec3(MAX),bmax = -vec3(MAX))
-        # find max cell size
+        # find max cell size  -----------------------------------------------------------------------------------
         eCellSize,fCellSize = -vec3(MAX),-vec3(MAX)
-        for vi in x:self.vAABBs[vi].EatPoint(x[vi]) # result in : bmin == bmax = self.x[vi]
+        for vi in x:self.vAABBs[vi].EatPoint(x[vi]).EatPoint(y[vi])
         for ei in self.edges:
             vi,vj = self.edges[ei]
-            self.eAABBs[ei].EatPoint(x[vi]).EatPoint(x[vj]).Extend(vec3(self.d))
+            self.eAABBs[ei].EatPoint(x[vi]).EatPoint(x[vj]).EatPoint(y[vi]).EatPoint(y[vj]).Extend(vec3(self.d))
             boxsize = self.eAABBs[ei].bmax-self.eAABBs[ei].bmin
             for i in ti.static(range(3)): ti.atomic_max(eCellSize[i],boxsize[i])
         for fi in self.faces:
             vi,vj,vk = self.faces[fi]
-            self.fAABBs[fi].EatPoint(x[vi]).EatPoint(x[vj]).EatPoint(x[vk]).Extend(vec3(self.d))
+            self.fAABBs[fi].EatPoint(x[vi]).EatPoint(x[vj]).EatPoint(x[vk]).EatPoint(y[vi]).EatPoint(y[vj]).EatPoint(y[vk]).Extend(vec3(self.d))
             boxsize = self.fAABBs[fi].bmax-self.fAABBs[fi].bmin
             for i in ti.static(range(3)): ti.atomic_max(fCellSize[i],boxsize[i])
-        # fill cell with faces or edges
+        # fill cell with faces or edges -----------------------------------------------------------------------------------
         self.cellfn.fill(0)
-        for i,j in self.cellfnode:ti.deactivate(self.cellfnode,[i,j])
+        for i, j in self.cellfnode: ti.deactivate(self.cellfnode, [i, j])
         for fi in self.fAABBs:
-            st,ed = ti.floor(self.fAABBs[fi].bmin/fCellSize).cast(ti.i32),ti.floor(self.fAABBs[fi].bmax/fCellSize).cast(ti.i32)
-            for i0,i1,i2 in ti.ndrange(ed[0]-st[0]+1,ed[1]-st[1]+1,ed[2]-st[2]+1):
-                i = self.IJK2TableI(st+vec3i(i0,i1,i2))
-                self.cellf[i,ti.atomic_add(self.cellfn[i],1)] = fi
-                if self.cellfn[i]>=self.enpc:print('cell too many faces ',self.cellfn[i])
+            st, ed = ti.floor(self.fAABBs[fi].bmin / fCellSize).cast(ti.i32), ti.floor(self.fAABBs[fi].bmax / fCellSize).cast(ti.i32)
+            for i0, i1, i2 in ti.ndrange(ed[0] - st[0] + 1, ed[1] - st[1] + 1, ed[2] - st[2] + 1):
+                i = self.IJK2TableI(st + vec3i(i0, i1, i2))
+                self.cellf[i, ti.atomic_add(self.cellfn[i], 1)] = fi
+                if self.cellfn[i] >= self.enpc: print('cell too many faces ', self.cellfn[i])
         self.cellen.fill(0)
         for i, j in self.cellenode: ti.deactivate(self.cellenode, [i, j])
         for ei in self.eAABBs:
             st, ed = ti.floor(self.eAABBs[ei].bmin / eCellSize).cast(ti.i32), ti.floor(self.eAABBs[ei].bmax / eCellSize).cast(ti.i32)
-            for i0,i1,i2 in ti.ndrange(ed[0]-st[0]+1,ed[1]-st[1]+1,ed[2]-st[2]+1):
+            for i0, i1, i2 in ti.ndrange(ed[0] - st[0] + 1, ed[1] - st[1] + 1, ed[2] - st[2] + 1):
                 i = self.IJK2TableI(st + vec3i(i0, i1, i2))
                 self.celle[i, ti.atomic_add(self.cellen[i], 1)] = ei
                 if self.cellen[i] >= self.enpc: print('cell too many edges ', self.cellen[i])
-        # actual pairs
-        for i,j in self.vfnode:ti.deactivate(self.vfnode,[i,j])
+        # collect actual pairs -----------------------------------------------------------------------------------
+        for i, j in self.vfnode: ti.deactivate(self.vfnode, [i, j])
         for vi in x:
-            i,x4 = self.IJK2TableI(ti.floor(x[vi]/fCellSize).cast(ti.i32)),x[vi]
+            i, x4 = self.IJK2TableI(ti.floor(x[vi] / fCellSize).cast(ti.i32)), x[vi]
             for fii in range(self.cellfn[i]):
-                fi = self.cellf[i,fii]
-                if vi == self.faces[fi][0] or  vi == self.faces[fi][1] or  vi == self.faces[fi][2]:continue
-                x1,x2,x3 = x[self.faces[fi][0]],x[self.faces[fi][1]],x[self.faces[fi][2]]
-                x13,x23,x43 = x1-x3,x2-x3,x4-x3
+                fi = self.cellf[i, fii]
+                if vi == self.faces[fi][0] or vi == self.faces[fi][1] or vi == self.faces[fi][2]: continue
+                x1, x2, x3 = x[self.faces[fi][0]], x[self.faces[fi][1]], x[self.faces[fi][2]]
+                x13, x23, x43 = x1 - x3, x2 - x3, x4 - x3
                 n = x13.cross(x23).normalized()
-                if ti.abs(x43.dot(n))>=self.d: continue
-                w = mat2([(x13.dot(x13),x13.dot(x23)),(x13.dot(x23),x23.dot(x23))]).inverse()@vec2(x13.dot(x43),x23.dot(x43))  #  [Bridson 2002]page4eq1
-                # d = self.d/ti.math.max(x13.norm(),x23.norm(),(x1-x2).norm())
-                if 0<=w[0]<=1 and 0<=w[1]<=1 and 0<=w.sum()<=1 : self.vf[vi,fi] = vec3(w[0],w[1],1-w.sum())
-        for i,j in self.eenode:ti.deactivate(self.eenode,[i,j])
+                if ti.abs(x43.dot(n)) >= self.d: continue
+                w = mat2([(x13.dot(x13), x13.dot(x23)), (x13.dot(x23), x23.dot(x23))]).inverse() @ vec2(x13.dot(x43), x23.dot(x43))  # [Bridson 2002]page4eq1
+                if 0 <= w[0] <= 1 and 0 <= w[1] <= 1 and 0 <= w.sum() <= 1: self.vf[vi, fi] = vec3(w[0], w[1],1 - w.sum())
+        for i, j in self.eenode: ti.deactivate(self.eenode, [i, j])
         for i in self.cellen:
             for ei0_ in range(self.cellen[i]):
-                ei0 = self.celle[i,ei0_]
-                v0i,v0j = self.edges[ei0][0],self.edges[ei0][1]
-                x1,x2 = x[v0i],x[v0j]
+                ei0 = self.celle[i, ei0_]
+                v0i, v0j = self.edges[ei0][0], self.edges[ei0][1]
+                x1, x2 = x[v0i], x[v0j]
                 for ei1_ in range(ei0_):
                     ei1 = self.celle[i, ei1_]
                     v1i, v1j = self.edges[ei1][0], self.edges[ei1][1]
-                    if v0i==v1i or v0i==v1j or  v0j==v1i or v0j==v1j :continue
+                    if v0i == v1i or v0i == v1j or v0j == v1i or v0j == v1j: continue
                     x3, x4 = x[v1i], x[v1j]
-                    x21,x31,x43 = x2-x1,x3-x1,x4-x3
+                    x21, x31, x43 = x2 - x1, x3 - x1, x4 - x3
                     n = x21.cross(x43)
-                    if n.norm()<EPS or ti.abs(x31.dot(n.normalized()))>=self.d: continue # ei0,ei1 parallel or distance > d
-                    w = mat2([(x21.dot(x21),-x21.dot(x43)),(-x21.dot(x43),x43.dot(x43))]).inverse()@vec2(x21.dot(x31),-x43.dot(x31))  # [Bridson 2002]page4eq2
-                    if 0<=w[0]<=1 and 0<=w[1]<=1: self.ee[ei0,ei1] = w
+                    if n.norm() < EPS or ti.abs(x31.dot(n.normalized())) >= self.d: continue  # ei0,ei1 parallel or distance > d
+                    w = mat2([(x21.dot(x21), -x21.dot(x43)), (-x21.dot(x43), x43.dot(x43))]).inverse() @ vec2(x21.dot(x31), -x43.dot(x31))  # [Bridson 2002]page4eq2
+                    if 0 <= w[0] <= 1 and 0 <= w[1] <= 1: self.ee[ei0, ei1] = w
 
-        # for vf pair: E = k/2*(d-(xv-(w1*x1+w2*x2+w3*x3).n)^2  [CAMA2016]        里面的那个距离计算见[Bridson 2002] page-5 eq(1)
+    @ti.kernel
+    def DiscreteUpdate(self,x:ti.template()):
         self.f.fill(0)
         self.pf_px.fill(0)
+        # for vf pair: E = k/2*(d-(xv-(w1*x1+w2*x2+w3*x3).n)^2  [CAMA2016]        里面的那个距离计算见[Bridson 2002] page-5 eq(1)
         for i,j in self.pf_px_node:ti.deactivate(self.pf_px_node,[i,j])
-
         for vi,fi in self.vf:
             k,idx = 1e3,(vi,self.faces[fi][0],self.faces[fi][1],self.faces[fi][2])
             C, C_jacobi, C_hess = Constraint.VF.C_DC_DDC(x[idx[0]],x[idx[1]],x[idx[2]],x[idx[3]],self.vf[vi,fi],self.d)
@@ -281,13 +308,6 @@ class Collision:
         for ei0,ei1 in self.ee:
             k,idx = 1e3,(self.edges[ei0][0],self.edges[ei0][1],self.edges[ei1][0],self.edges[ei1][1])
             C, C_jacobi, C_hess = Constraint.EE.C_DC_DDC(x[idx[0]],x[idx[1]],x[idx[2]],x[idx[3]],self.ee[ei0,ei1],self.d)
-            # if idx[0]==11 and idx[1]==12 and idx[2]==3 and idx[3]==8:
-            #     x0,x1,x2,x3 = x[idx[0]],x[idx[1]],x[idx[2]],x[idx[3]]
-            #     w = self.ee[ei0,ei1]
-            #     n = (x0 - x1).cross(x2 - x3).normalized()
-            #     a, b = x0 + w[0] * (x1 - x0), x2 + w[1] * (x3 - x2)
-            #     if n.dot(a - b) < 0: n *= -1
-            #     print('ATTENTION0  ',(a-b).dot(n))
             if C<0 or C>self.d:print('[ERR] ee C=',C,idx)
             if -EPS < C < EPS: continue
             for i_ in ti.static(range(4)):
@@ -302,7 +322,7 @@ class Material:
     def __init__(self,cloth):
         self.vn = len(cloth.vertices)
         self.stretch = Constraint.EdgeStrecth(cloth, 1e4, 0.0000)
-        self.bend = Constraint.Bend(cloth, 0.001, 0.00000)
+        self.bend = Constraint.Bend(cloth, 0.0001, 0.00000)
         self.ij = sorted(list(  set().union(*[con.ij for con in [self.stretch,self.bend]])     ))  # 一个关键的观察，一旦约束定下来了，稀疏hessian的ij项也就定下来了。
         self.f = ti.Vector.field(3, ti.f64, self.vn)
         self.pf_px = ti.Matrix.field(3, 3, ti.f64)
@@ -375,7 +395,8 @@ class Simulator:
         cloth = trimesh.load(clothobjpath)
         self.cloth = cloth
         self.vn, self.en, self.fn = len(cloth.vertices), len(cloth.edges_unique), len(cloth.faces)
-        self.x = ti.Vector.field(3, ti.f64, self.vn)
+        self.x = ti.Vector.field(3, ti.f64, self.vn)  # position at the start of time step
+        self.y = ti.Vector.field(3, ti.f64, self.vn)  # position after cloth internal dynamics (after material before ccd)
         self.x.from_numpy(cloth.vertices)
         self.v = ti.Vector.field(3, ti.f64, self.vn)
         self.v.from_numpy(np.zeros_like(cloth.vertices))
@@ -446,27 +467,33 @@ class Simulator:
                     self.hess_value_variadic[9 * triplet_i + 3 * i_ + j_] = self.A[i,j][i_,j_]
 
     @ti.kernel
-    def Update(self, dv: ti.types.ndarray(dtype=vec3,ndim=1)):
+    def UpdateY(self, dv: ti.types.ndarray(dtype=vec3,ndim=1)):
         for I in ti.grouped(dv): self.v[I] += dv[I]
-        for i in self.x: self.x[i] += self.h * self.v[i]
+        for i in self.y: self.y[i] = self.x[i] + self.h * self.v[i]
+
+    @ti.kernel
+    def UpdateX(self):
+        for i in self.v:self.v[i] = (self.y[i]-self.x[i])/self.h
+        for i in self.x :self.x[i] = self.y[i]
 
     def Run(self):
         self.material.Update(self.x,self.v)
         self.constraints.Update(self.x,self.v)
-        self.collision.Update(self.x,self.v)
+        self.collision.CollectCollisionPairs(self.x,self.x,False)
+        self.collision.DiscreteUpdate(self.x)
         self.AssembleMatrix()
         rhs = self.h * self.b.to_numpy().reshape(-1)
-        # lhs = sp.coo_matrix((self.hess_value.to_numpy(), (self.hess_i, self.hess_j)), shape=(3 * self.vn, 3 * self.vn)).tocsr()
         hessI = np.r_[self.hess_i,self.hess_i_variadic.to_numpy()[:self.curr_variadic_entry_num[None]]]
         hessJ = np.r_[self.hess_j,self.hess_j_variadic.to_numpy()[:self.curr_variadic_entry_num[None]]]
         hessV = np.r_[self.hess_value.to_numpy(),self.hess_value_variadic.to_numpy()[:self.curr_variadic_entry_num[None]]]
         lhs = sp.coo_matrix((hessV, (hessI,hessJ)), shape=(3 * self.vn, 3 * self.vn)).tocsr()
-        self.Update(sp.linalg.spsolve(lhs, rhs).reshape(self.vn, 3))
+        self.UpdateY(sp.linalg.spsolve(lhs, rhs).reshape(self.vn, 3))
+        self.UpdateX()
         self.external_force.fill(0)
         return self
 
 def Main(testcase):
-    simulator = Simulator(testcase, [1,5,7,9 ])
+    simulator = Simulator(testcase, [1 ]) # ,5,7,9
     ps.init()
     ps.set_warn_for_invalid_values(True)
     ps.set_ground_plane_mode('none')
@@ -490,4 +517,4 @@ def Main(testcase):
         ps.frame_tick()
         frameid += 1
 
-Main('./assets/twoquad.obj')
+Main('./assets/quad01.obj')
