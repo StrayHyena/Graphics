@@ -1,4 +1,4 @@
-# 【ref 1】 Robust Treatment of Collisions, Contact and Friction for Cloth Animation
+# ref1:Robust Treatment of Collisions, Contact and Friction for Cloth Animation
 
 import numpy as np
 import polyscope as ps
@@ -10,9 +10,8 @@ import trimesh,time
 ti.init(arch=ti.cpu,default_fp=ti.f64)
 EPS,MAX = 1e-8,1.7976931348623157e+308
 I3,O3 = ti.math.mat3([[1,0,0],[0,1,0],[0,0,1]]),ti.math.mat3([[0,0,0],[0,0,0],[0,0,0]])
-vec3,vec2,mat2,vec3i,vec4i,mat4x3 = ti.math.vec3,ti.math.vec2,ti.math.mat2,ti.math.ivec3,ti.math.ivec4,ti.types.matrix(4, 3, ti.f64)
+vec4,vec3,vec2,mat2,vec3i = ti.math.vec4,ti.math.vec3,ti.math.vec2,ti.math.mat2,ti.math.ivec3
 nan,inf = ti.math.nan,ti.math.inf
-DISCRETE,CONTINUOUS,VF,EE = 0,1,0,1
 
 class Constraint:
     @ti.data_oriented
@@ -93,7 +92,7 @@ class Constraint:
             self.k = ti.field(ti.f64, self.n)
             self.k.fill(k)
 
-        @ti.func     #  x index is conform with the ref paper: 【Derivation of discrete bending forces and their gradients】
+        @ti.func     #  x index is conform with the ref paper: Derivation of discrete bending forces and their gradients
         def C_DC_DDC(x0,x1,x2,x3,l0): # constraint, derivative of constraint, 2nd derivative of constraint
             e0,e1,e2,e3,e4 = x1-x0,x2-x0,x3-x0,x2-x1,x3-x1  # Figure 1
             e0l = e0.norm()
@@ -121,21 +120,6 @@ class Constraint:
            (cos3*n1_.outer_product(m01_)-m3_.outer_product(n1_))/(h01*h3),(cos1*n1_.outer_product(m01_)-m1_.outer_product(n1_))/(h01*h1),-(m01_.outer_product(n1_)+n1_.outer_product(m01_))/h01**2,0,    # page 21
            (cos4*n2_.outer_product(m02_)-m4_.outer_product(n2_))/(h02*h4),(cos4*n2_.outer_product(m02_)-m2_.outer_product(n2_))/(h02*h2),0,-(m02_.outer_product(n2_)+n2_.outer_product(m02_))/h02**2   # page 21
                  )
-
-    class Contact:
-        @ti.func
-        def C_DC_DDC(x0, x1, x2,x3,type:ti.i8, w: vec2, thickness):
-            n,C,grad0,grad1,grad2,grad3 = vec3(nan),nan,vec3(nan),vec3(nan),vec3(nan),vec3(nan)
-            if type==VF:
-                n,w2 = (x1 - x0).cross(x2 - x0).normalized(),1-w.sum()
-                if (x3 - w[0] * x0 - w[1] * x1 - w2 * x2).dot(n) < 0: n *= -1  # 假设此时v在f正确的一边，n总是从face指向vertex
-                C,grad0,grad1,grad2,grad3 = thickness - (x3 - w[0] * x0 - w[1] * x1 - w2 * x2).dot(n), w[0] * n, w[1] * n, w2 * n,-n
-            if type==EE:
-                a, b = x0 + w[0] * (x1 - x0), x2 + w[1] * (x3 - x2)
-                n = (x0 - x1).cross(x2 - x3).normalized()
-                if n.dot(a - b) < 0: n *= -1  # 假设此时e0在e1正确的一边，总是e1指向e0
-                C,grad0,grad1,grad2,grad3 = thickness - (a-b).dot(n), -(1-w[0])*n,-w[0]*n,(1-w[1])*n,w[1]*n
-            return C, (grad0,grad1,grad2,grad3),(O3, O3, O3, O3, O3, O3, O3, O3, O3, O3, O3, O3, O3, O3, O3, O3)
 
     class VF:
         @ti.func
@@ -197,21 +181,11 @@ class Collision:
         @ti.func
         def Extend(self,value:vec3):return self.EatPoint(self.bmin-value).EatPoint(self.bmax+value)
 
-    @ti.dataclass
-    class Contact:
-        time_type:ti.i8  # discrete or continuous
-        pair_type:ti.i8  # vf or ee
-        toi:ti.f64       # valid if time_type is continuous
-        idx:vec4i        # f0,f1,f2,v  or  e0i,e0j,e1i,e1j
-        x:mat4x3
-        y:mat4x3         # valid if time_type is continuous
-        w:vec2           # w is (a,b) in ref1-page4 for ee ; w is (w1,w2) in ref1-page4 for vf (w3 is 1-w1-w2)
-
     @ti.func
     def IJK2TableI(self,ijk):return (73856093*ijk[0]^19349663*ijk[1]^83492791*ijk[2])%self.tablesize
 
-    def __init__(self,cloth,tablesize=2039,element_num_per_cell=512,thickness=0.001):
-        self.tablesize,self.d,self.enpc = tablesize,thickness,element_num_per_cell
+    def __init__(self,cloth,tablesize=2039,element_num_per_cell=512,thickness=0.001,stiffness=1e3):
+        self.tablesize,self.d,self.k,self.enpc = tablesize,thickness,stiffness,element_num_per_cell
         self.vn,self.en,self.fn = len(cloth.vertices),len(cloth.edges_unique),len(cloth.faces)
         self.edges = ti.Vector.field(2,ti.i32,self.en)
         self.edges.from_numpy(cloth.edges_unique.astype(np.int32))
@@ -230,8 +204,12 @@ class Collision:
         self.cellenode.place(self.celle)
         self.cellen = ti.field(ti.i32,tablesize)
         # Narrow Phase
-        self.contact_n = ti.field(ti.i32,shape=())
-        self.contacts = self.Contact.field(shape=self.vn**2)
+        self.vf = ti.Vector.field(4,ti.f64)                                 # w[0],w[1],w[2] is w1,w2,w3 in the ref1-page4,w[3] is time of impact in case of CCD;  vf pairs' barycentric coordinate where actual collisions occur
+        self.vfnode = ti.root.pointer(ti.i,self.vn).bitmasked(ti.j,self.fn) # use this sparse structure to remove repeated pair from broad phase
+        self.vfnode.place(self.vf)
+        self.ee = ti.Vector.field(4,ti.f64)                                 # w[0],w[1] is a,b in the ref1-page4,w[3] is time of impact in case of CCD;
+        self.eenode = ti.root.pointer(ti.i,self.en).bitmasked(ti.j,self.en)
+        self.eenode.place(self.ee)
 
         self.f = ti.Vector.field(3, ti.f64, self.vn)
         self.pf_px = ti.Matrix.field(3, 3, ti.f64)
@@ -288,7 +266,7 @@ class Collision:
                 self.celle[i, ti.atomic_add(self.cellen[i], 1)] = ei
                 if self.cellen[i] >= self.enpc: print('cell too many edges ', self.cellen[i])
         # collect actual pairs -----------------------------------------------------------------------------------
-        self.contact_n[None] = 0
+        for i, j in self.vfnode: ti.deactivate(self.vfnode, [i, j])
         for vi in X:
             i, x4 = self.IJK2TableI(ti.floor(X[vi] / fCellSize).cast(ti.i32)), X[vi]
             for fii in range(self.cellfn[i]):
@@ -309,19 +287,14 @@ class Collision:
                         if r[j]<=0 or r[j]>=1:continue
                         x1t,x2t,x3t,x4t = ti.math.mix(x1,y1,r[j]),ti.math.mix(x2,y2,r[j]),ti.math.mix(x3,y3,r[j]),ti.math.mix(x4,y4,r[j])
                         w = vec3((x4t-x2t).cross(x4t-x3t).norm(),(x4t-x1t).cross(x4t-x3t).norm(),(x4t-x2t).cross(x4t-x1t).norm())/(x2t-x1t).cross(x3t-x1t).norm()
-                        if abs(w.sum()-1)<EPS:
-                            contactI = ti.atomic_add(self.contact_n[None], 1)
-                            self.contacts[contactI] = self.Contact(time_type=CONTINUOUS, pair_type=VF, toi=r[j],idx=vec4i(vi1, vi2, vi3, vi),
-                                                                   x=mat4x3((x1, x2, x3, x4)),y=mat4x3((y1, y2, y3, y4)), w=vec2(w[0],w[1]))
+                        if abs(w.sum()-1)<EPS:  self.vf[vi, fi] = vec4(w,r[j])
                         break
                 else:
                     n = x13.cross(x23).normalized()
                     if ti.abs(x43.dot(n)) >= self.d: continue
                     w = mat2([(x13.dot(x13), x13.dot(x23)), (x13.dot(x23), x23.dot(x23))]).inverse() @ vec2(x13.dot(x43), x23.dot(x43))  # [Bridson 2002]page4eq1
-                    if 0 <= w[0] <= 1 and 0 <= w[1] <= 1 and 0 <= w.sum() <= 1:
-                        contactI = ti.atomic_add(self.contact_n[None],1)
-                        self.contacts[contactI] = self.Contact(time_type=DISCRETE, pair_type=VF, toi=nan,idx=vec4i(vi1, vi2, vi3, vi),
-                                                               x=mat4x3((x1, x2, x3, x4)),y=mat4x3((x1, x2, x3, x4)), w=w)
+                    if 0 <= w[0] <= 1 and 0 <= w[1] <= 1 and 0 <= w.sum() <= 1: self.vf[vi, fi] = vec4(w,1-w.sum(),nan)
+        for i, j in self.eenode: ti.deactivate(self.eenode, [i, j])
         for i in self.cellen:
             for ei0_ in range(self.cellen[i]):
                 ei0 = self.celle[i, ei0_]
@@ -346,22 +319,13 @@ class Collision:
                             x1t,x2t,x3t,x4t = ti.math.mix(x1,y1,r[j]),ti.math.mix(x2,y2,r[j]),ti.math.mix(x3,y3,r[j]),ti.math.mix(x4,y4,r[j])
                             x21,x43,x31 = x2t-x1t,x4t-x3t,x3t-x1t
                             w = mat2([(x21.dot(x21), -x21.dot(x43)), (-x21.dot(x43), x43.dot(x43))]).inverse() @ vec2(x21.dot(x31), -x43.dot(x31))  # [Bridson 2002]page4eq2
-                            if 0 <= w[0] <= 1 and 0 <= w[1] <= 1:
-                                contactI = ti.atomic_add(self.contact_n[None], 1)
-                                self.contacts[contactI] = self.Contact(time_type=CONTINUOUS, pair_type=EE, toi=r[j],
-                                                                       idx=vec4i(v0i, v0j, v1i, v1j),
-                                                                       x=mat4x3((x1, x2, x3, x4)),
-                                                                       y=mat4x3((y1, y2, y3, y4)), w=w)
-
+                            if 0 <= w[0] <= 1 and 0 <= w[1] <= 1:  self.ee[ei0, ei1] = vec4(w,nan,r[j])
                             break
                     else:
                         n = x21.cross(x43)
                         if n.norm() < EPS or ti.abs(x31.dot(n.normalized())) >= self.d: continue  # ei0,ei1 parallel or distance > d
                         w = mat2([(x21.dot(x21), -x21.dot(x43)), (-x21.dot(x43), x43.dot(x43))]).inverse() @ vec2(x21.dot(x31), -x43.dot(x31))  # [Bridson 2002]page4eq2
-                        if 0 <= w[0] <= 1 and 0 <= w[1] <= 1:
-                            contactI = ti.atomic_add(self.contact_n[None], 1)
-                            self.contacts[contactI] = self.Contact(time_type=DISCRETE, pair_type=EE, toi=nan, idx=vec4i(v0i, v0j, v1i, v1j),
-                                                                    x=mat4x3((x1, x2, x3, x4)), y=mat4x3((x1, x2, x3, x4)), w=w)
+                        if 0 <= w[0] <= 1 and 0 <= w[1] <= 1: self.ee[ei0, ei1] = vec4(w,nan,nan)
 
     @ti.kernel
     def Update(self,X:ti.template()):
@@ -369,18 +333,28 @@ class Collision:
         self.pf_px.fill(0)
         # for vf pair: E = k/2*(d-(xv-(w1*x1+w2*x2+w3*x3).n)^2  [CAMA2016]        里面的那个距离计算见[Bridson 2002] page-5 eq(1)
         for i,j in self.pf_px_node:ti.deactivate(self.pf_px_node,[i,j])
-        for contact_i in range(self.contact_n[None]):
-            contact = self.contacts[contact_i]
-            k,idx = 5e2,contact.idx
-            C, C_jacobi, C_hess = Constraint.Contact.C_DC_DDC(X[idx[0]], X[idx[1]], X[idx[2]], X[idx[3]],contact.pair_type, contact.w , self.d)
-            if C < 0 or C > self.d: print('[ERR] contact constraint C=', C, idx)
+        for vi,fi in self.vf:
+            idx = (vi,self.faces[fi][0],self.faces[fi][1],self.faces[fi][2])
+            C, C_jacobi, C_hess = Constraint.VF.C_DC_DDC(X[idx[0]],X[idx[1]],X[idx[2]],X[idx[3]],self.vf[vi,fi].xyz,self.d)
+            if C<0 or C>self.d:print('[ERR] vf C=',C,idx)
             if -EPS < C < EPS: continue
             for i_ in ti.static(range(4)):
                 i, pC_pxi = idx[i_], C_jacobi[i_]
-                self.f[i] += -k * pC_pxi * C
+                self.f[i] += -self.k * pC_pxi * C
                 for j_ in ti.static(range(4)):
                     j, pC_pxj = idx[j_], C_jacobi[j_]
-                    self.pf_px[i, j] += -k * pC_pxi.outer_product(pC_pxj) - C_hess[4 * i_ + j_] * k * C
+                    self.pf_px[i, j] += -self.k * pC_pxi.outer_product(pC_pxj) - C_hess[4 * i_ + j_] * self.k * C
+        for ei0,ei1 in self.ee:
+            idx = (self.edges[ei0][0],self.edges[ei0][1],self.edges[ei1][0],self.edges[ei1][1])
+            C, C_jacobi, C_hess = Constraint.EE.C_DC_DDC(X[idx[0]],X[idx[1]],X[idx[2]],X[idx[3]],self.ee[ei0,ei1].xy,self.d)
+            if C<0 or C>self.d:print('[ERR] ee C=',C,idx)
+            if -EPS < C < EPS: continue
+            for i_ in ti.static(range(4)):
+                i, pC_pxi = idx[i_], C_jacobi[i_]
+                self.f[i] += -self.k * pC_pxi * C
+                for j_ in ti.static(range(4)):
+                    j, pC_pxj = idx[j_], C_jacobi[j_]
+                    self.pf_px[i, j] += -self.k * pC_pxi.outer_product(pC_pxj) - C_hess[4 * i_ + j_] * self.k * C
 
 @ti.data_oriented
 class Material:
