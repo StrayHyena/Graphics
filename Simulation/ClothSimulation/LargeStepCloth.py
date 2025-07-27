@@ -1,4 +1,5 @@
 # ref1:Robust Treatment of Collisions, Contact and Friction for Cloth Animation
+# ref2:Derivation of discrete bending forces and their gradients
 
 import numpy as np
 import polyscope as ps
@@ -8,7 +9,7 @@ import scipy.sparse as sp
 import trimesh,time
 
 ti.init(arch=ti.cpu,default_fp=ti.f64)
-EPS,MAX = 1e-8,1.7976931348623157e+308
+EPS,MAX,EPS10 = 1e-8,1.7976931348623157e+308,1e-10
 I3,O3 = ti.math.mat3([[1,0,0],[0,1,0],[0,0,1]]),ti.math.mat3([[0,0,0],[0,0,0],[0,0,0]])
 vec4,vec3,vec2,mat2,vec3i = ti.math.vec4,ti.math.vec3,ti.math.vec2,ti.math.mat2,ti.math.ivec3
 nan,inf = ti.math.nan,ti.math.inf
@@ -92,7 +93,7 @@ class Constraint:
             self.k = ti.field(ti.f64, self.n)
             self.k.fill(k)
 
-        @ti.func     #  x index is conform with the ref paper: Derivation of discrete bending forces and their gradients
+        @ti.func     #  x index is conform with the ref2 paper: Derivation of discrete bending forces and their gradients
         def C_DC_DDC(x0,x1,x2,x3,l0): # constraint, derivative of constraint, 2nd derivative of constraint
             e0,e1,e2,e3,e4 = x1-x0,x2-x0,x3-x0,x2-x1,x3-x1  # Figure 1
             e0l = e0.norm()
@@ -147,7 +148,7 @@ class Collision:
     def quadratic_root(a: ti.f64, b: ti.f64, c: ti.f64):
         count, x0, x1, d = 0, nan, nan, b * b - 4 * a * c
         if d >= 0: count, x0, x1 = 2, 0 if c == 0 else -2 * c / (b + ti.math.sign(b) * ti.sqrt(d)), -(b + ti.math.sign(b) * ti.sqrt(d)) / (2 * a)
-        return 1 if 0 <= d < EPS or -EPS < a < EPS else count, ti.min(x0, x1), ti.max(x0, x1)
+        return 1 if 0 <= d < EPS10 or -EPS10 < a < EPS10 else count, ti.min(x0, x1), ti.max(x0, x1)
 
     @ti.func
     def cubic_root(a: ti.f64, b: ti.f64, c: ti.f64, d: ti.f64):
@@ -166,6 +167,7 @@ class Collision:
         if count == 3:  # 这个值在三个根中是中间的那个
             x1 = x0
             qcount, x0, x2 = Collision.quadratic_root(a, b + a * x1, c + (b + a * x1) * x1)
+        if -EPS10 < a < EPS10 : count,x0,x1 = Collision.quadratic_root(b,c,d)
         return count, vec3(x0, x1, x2)
 
     @ti.dataclass
@@ -310,10 +312,9 @@ class Collision:
                         y1,y2,y3,y4 = Y[v0i],Y[v0j],Y[v1i],Y[v1j]
                         v1,v2,v3,v4 = y1-x1,y2-x2,y3-x3,y4-x4
                         v43,v21,v31 = v4-v3,v2-v1,v3-v1
-                        n,r = Collision.cubic_root(v43.dot(v21.cross(v31)),
-                                                   x43.dot(v21.cross(v31))+v43.dot(v21.cross(x31))+v43.dot(x21.cross(v31)),
-                                                   x43.dot(v21.cross(x31))+x43.dot(x21.cross(v31))+v43.dot(x21.cross(x31)),
-                                                   x43.dot(x21.cross(x31)) )
+                        a,b,c,d = v43.dot(v21.cross(v31)),x43.dot(v21.cross(v31))+v43.dot(v21.cross(x31))+v43.dot(x21.cross(v31)),x43.dot(v21.cross(x31))+x43.dot(x21.cross(v31))+v43.dot(x21.cross(x31)),x43.dot(x21.cross(x31))
+                        n,r = Collision.cubic_root(a,b,c,d)
+                        # if v0i==41: print(v0i,v0j,v1i,v1j,n,r,a,b,c,d)
                         for j in range(n):
                             if r[j] <= 0 or r[j] >= 1: continue
                             x1t,x2t,x3t,x4t = ti.math.mix(x1,y1,r[j]),ti.math.mix(x2,y2,r[j]),ti.math.mix(x3,y3,r[j]),ti.math.mix(x4,y4,r[j])
@@ -528,13 +529,22 @@ class Simulator:
         hessV = np.r_[self.hess_value.to_numpy(),self.hess_value_variadic.to_numpy()[:self.curr_variadic_entry_num[None]]]
         lhs = sp.coo_matrix((hessV, (hessI,hessJ)), shape=(3 * self.vn, 3 * self.vn)).tocsr()
         self.UpdateY(sp.linalg.spsolve(lhs, rhs).reshape(self.vn, 3))
-        # self.collision.CollectCollisionPairs(self.x,self.y,True)
+        self.collision.CollectCollisionPairs(self.x,self.y,True)
         self.UpdateX()
         self.external_force.fill(0)
         return self
 
+    def TestCCD(self,X_path,Y_path):
+        mesh_x,mesh_y = trimesh.load(X_path),trimesh.load(Y_path)
+        self.x.from_numpy(mesh_x.vertices)
+        self.y.from_numpy(mesh_y.vertices)
+        self.collision.CollectCollisionPairs(self.x,self.y,True)
+        self.collision.Print()
+
 def Main(testcase):
     simulator = Simulator(testcase, [1,125,190,62 ]) # ,5,7,9
+    # simulator.TestCCD('./assets/debug/110.obj','./assets/debug/111.obj')
+    # return
     ps.init()
     ps.set_warn_for_invalid_values(True)
     ps.set_ground_plane_mode('none')
@@ -551,8 +561,9 @@ def Main(testcase):
         if not stepmode or (stepmode and  io.MouseDoubleClicked[0]):ps_mesh.update_vertex_positions(simulator.Run().x.to_numpy())
         simulator.cloth.vertices = simulator.x.to_numpy()
         simulator.cloth.export('assets/seq/' + str(frameid)+'.obj')
-        # if simulator.curr_variadic_entry_num[None] >= 1:
-        #     simulator.collision.Print()
+        if simulator.curr_variadic_entry_num[None] >= 1:
+            simulator.collision.Print()
+            # exit(0)
         #     print('max v ',simulator.v.to_numpy().max())
         # if frameid==109:    exit()
         ps.frame_tick()
