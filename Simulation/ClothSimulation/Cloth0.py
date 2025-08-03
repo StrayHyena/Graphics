@@ -7,6 +7,7 @@ from scipy.optimize import minimize
 import trimesh,time,collections
 # ref1:Robust Treatment of Collisions, Contact and Friction for Cloth Animation
 # ref2:Derivation of discrete bending forces and their gradients
+# ref3:Optimized Spatial Hashing for Collision Detection of Deformable Objects
 # There are three types of Constraints.
 # A. 【Material】Material-related, e.g. bend,edge stretch, which are decided by the cloth geometry
 # B. 【CustomConstraint】User-defined constraint, e.g. pin point, stitch points (only support pin point now)
