@@ -57,11 +57,11 @@ Taichi -- 1.7.3
 |  <img src="./results/mpm_snow.gif" alt="show" />   | <img src="./results/XPBD_Chain.gif" alt="show" />    | <img src="./results/rope.gif" alt="show" />  
 
 
-<font color=#288FD4  size=5 >Continuous Collision</font>
-- Robust Treatment of Collisions, Contact and Friction for Cloth Animation  
-- Cubic equation solver (bisect)
-- Vertex-Face Edge-Edge Collision 
-<img src="./results/continuous_collision.gif" alt="show" />  
+<font color=#288FD4  size=5 >Cloth Simulation</font>
+- Robust Treatment of Collisions, Contact and Friction for Cloth Animation
+- Derivation of discrete bending forces and their gradients
+- Optimized Spatial Hashing for Collision Detection of Deformable Objects  
+<img src="./results/quad2_collision_harden.gif" alt="show" />  
 
 
 
