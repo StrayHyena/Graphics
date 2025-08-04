@@ -67,26 +67,14 @@ class Constraint:
     @ti.data_oriented
     class Bend:
         def __init__(self,cloth,k,kd):
-            self.kd,edge_faces = kd, {(min(i,j),max(i,j)):[]for i,j in cloth.edges_unique} # 这个边链接了哪些三角形
+            self.kd,indices,edge_counter_pts = kd,[], {(i,j):[]for i,j in cloth.edges_unique} # 这个边链接了哪些三角形
             for f in cloth.faces:
                 for i in range(3):
                     vi,vj = f[i],f[(i+1)%3]
-                    key = (min(vi,vj),max(vi,vj))
-                    edge_faces[key].append(f)
-            indices = []
-            for (i,j),fs in edge_faces.items():
-                if len(fs)!=2:continue
-                indices.append([i,j])
-                for f in fs:
-                    for vi in f:
-                        if vi==i or vi==j:continue
-                        indices[-1].append(vi)
-            self.ij = set()
-            for idx in indices:
-                assert len(idx)==4
-                for i in range(4):
-                    for j in range(4):
-                        self.ij.add((idx[i],idx[j]))
+                    edge_counter_pts[(min(vi,vj),max(vi,vj))].append(f[(i+2)%3])
+            for (i,j),pts in edge_counter_pts.items():
+                if len(pts)==2:indices.append([i,j,pts[0],pts[1]])
+            self.ij = {(idx[i], idx[j]) for idx in indices for i in range(4) for j in range(4)}
             self.n = len(indices) # how many constraints
             self.idx = ti.Vector.field(4,ti.i32, self.n)
             self.idx.from_numpy(np.array(indices).astype(np.int32))  # if len(indices)!=0:
@@ -181,8 +169,8 @@ class Collision:
     @ti.func
     def IJK2TableI(self,ijk):return (73856093*ijk[0]^19349663*ijk[1]^83492791*ijk[2])%self.tablesize
 
-    def __init__(self,cloth,tablesize=2039,element_num_per_cell=512,thickness=0.001,stiffness=1e3):
-        self.tablesize,self.d,self.k,self.enpc = tablesize,thickness,stiffness,element_num_per_cell
+    def __init__(self,cloth,thickness,stiffness=1e3):
+        self.tablesize,self.d,self.k,self.enpc = 2039,thickness,stiffness,512
         self.vn,self.en,self.fn = len(cloth.vertices),len(cloth.edges_unique),len(cloth.faces)
         self.edges = ti.Vector.field(2,ti.i32,self.en)
         self.edges.from_numpy(cloth.edges_unique.astype(np.int32))
@@ -192,13 +180,13 @@ class Collision:
         self.fAABBs = self.AABB.field(shape = self.fn)
         # Broad Phase
         self.cellf = ti.field(ti.i32)   #  face(triangle index) in spatial cell, cellf[i]里放的是一些在这个cell里的face indices
-        self.cellfnode = ti.root.pointer(ti.i,tablesize).dense(ti.j,element_num_per_cell)
+        self.cellfnode = ti.root.pointer(ti.i,self.tablesize).dense(ti.j,self.enpc)
         self.cellfnode.place(self.cellf)
-        self.cellfn = ti.field(ti.i32,tablesize)  # how many current faces at each table entry ?
+        self.cellfn = ti.field(ti.i32,self.tablesize)  # how many current faces at each table entry ?
         self.celle = ti.field(ti.i32)  #  edge(edge index) in spatial cell
-        self.cellenode = ti.root.pointer(ti.i,tablesize).dense(ti.j,element_num_per_cell)
+        self.cellenode = ti.root.pointer(ti.i,self.tablesize).dense(ti.j,self.enpc)
         self.cellenode.place(self.celle)
-        self.cellen = ti.field(ti.i32,tablesize)
+        self.cellen = ti.field(ti.i32,self.tablesize)
         # Narrow Phase
         self.vf = ti.Vector.field(4,ti.f64)                                 # w[0],w[1],w[2] is w1,w2,w3 in the ref1-page4,w[3] is time of impact in case of CCD;  vf pairs' barycentric coordinate where actual collisions occur
         self.vfnode = ti.root.pointer(ti.i,self.vn).bitmasked(ti.j,self.fn) # use this sparse structure to remove repeated pair from broad phase
@@ -350,8 +338,8 @@ class Collision:
 class Material:
     def __init__(self,cloth):
         self.vn = len(cloth.vertices)
-        self.stretch = Constraint.EdgeStrecth(cloth, 1e3, 0.0001)
-        self.bend = Constraint.Bend(cloth, 0.0001, 0.00001)
+        self.stretch = Constraint.EdgeStrecth(cloth, 1e3, 1e-2)
+        self.bend = Constraint.Bend(cloth, 1e-4, EPS10)
         self.ij = sorted(list(  set().union(*[con.ij for con in [self.stretch,self.bend]])     ))  # 一个关键的观察，一旦约束定下来了，稀疏hessian的ij项也就定下来了。
         self.f = ti.Vector.field(3, ti.f64, self.vn)
         self.pf_px = ti.Matrix.field(3, 3, ti.f64)
@@ -384,7 +372,7 @@ class Material:
             C, C_jacobi, C_hess = Constraint.Bend.C_DC_DDC(X[i0], X[i1], X[i2], X[i3],self.bend.l0[ci])
             if -EPS8 < C < EPS8: continue
             for i_ in ti.static(range(4)):
-                i, pC_pxi, dotC = self.bend.idx[ci][i_], C_jacobi[i_], C_jacobi[i_].dot(v[i_])
+                i, pC_pxi, dotC = self.bend.idx[ci][i_], C_jacobi[i_],C_jacobi[i_].dot(v[i_])
                 self.f[i] += -k * pC_pxi * C - kd * pC_pxi * dotC
                 for j_ in ti.static(range(4)):
                     j, pC_pxj = self.bend.idx[ci][j_], C_jacobi[j_]
@@ -441,7 +429,6 @@ class ImpactZone:
         def ci(self,i,x):
             x,impact = x.reshape(self.vn,3),self.impacts[i]
             return impact.d+sum([np.dot(impact.n,impact.w[i]*x[self.vid2i[vid]]) for i,vid in enumerate(impact.idx)])
-        # 这里的X,Y是整个cloth的
         def Solve(self):
             self.idx = sorted(list(self.idx))
             self.vn, self.cn = len(self.idx), len(self.impacts)
@@ -504,7 +491,7 @@ class ImpactZone:
             npidx,npw,nptype,nptoi,npn,npx,npy = self.idx.to_numpy(),self.w.to_numpy(),self.type.to_numpy(),self.toi.to_numpy(),self.n.to_numpy(),self.x.to_numpy(),self.y.to_numpy()
             impacts = [self.Impact(npidx[i],npw[i],nptype[i],nptoi[i],npn[i],npx[i],npy[i],self.cs.d) for i in range(self.curr_impacts_num[None])]
             if len(impacts)==0:
-                if i!=100: print(i-100,'impact zone success')
+                if i!=100: print('IZ success in [',i-100,']')
                 return
             # 2. make independent impacts. 它里面的任一idx最多出现i//100次
             new_impacts = []
@@ -534,7 +521,7 @@ class ImpactZone:
 
 @ti.data_oriented
 class Simulator:
-    def __init__(self, clothobjpath, pins=[]):
+    def __init__(self, clothobjpath, pins=[],thickness=1e-3):
         self.h = 1.0 / 150.0
         cloth = trimesh.load(clothobjpath)
         self.cloth = cloth
@@ -552,7 +539,7 @@ class Simulator:
 
         self.material    = Material(cloth)
         self.constraints = CustomConstraint(cloth,pins)
-        self.collision   = Collision(cloth)
+        self.collision   = Collision(cloth,thickness)
         self.iz          = ImpactZone(self.collision)
         self.b = ti.Vector.field(3, ti.f64, self.vn)
         self.A = ti.Matrix.field(3, 3, ti.f64)
@@ -646,7 +633,7 @@ class Simulator:
         self.collision.CollectCollisionPairs(self.x,self.y,True)
         self.collision.Print()
 
-def Main(testcase,export_obj):
+def Main(testcase,export_obj=False,stop_frame=500):
     simulator = Simulator(testcase, [1,125,190,62 ]) # ,5,7,9
     # simulator.TestCCD(119)
     # exit(0)
@@ -660,15 +647,15 @@ def Main(testcase,export_obj):
     ps_mesh.set_back_face_color((242/255, 220/255, 107/255))
     ps_mesh.set_back_face_policy('custom')
     ps_mesh.set_edge_width(1.0)
-    io,frameid,stepmode = psim.GetIO(),0,False
-    while not io.KeyCtrl:
-        print('FRAME ',frameid,'------------------------')
-        if not stepmode or (stepmode and  io.MouseDoubleClicked[0]):ps_mesh.update_vertex_positions(simulator.Run().x.to_numpy())
+    io,frameid = psim.GetIO(),0
+    while not io.KeyCtrl and frameid<stop_frame:
+        print('\nFRAME ',frameid,'------------------------')
+        ps_mesh.update_vertex_positions(simulator.Run().x.to_numpy())
         if export_obj:
             simulator.cloth.vertices = simulator.x.to_numpy()
             simulator.cloth.export('assets/seq/' + str(frameid)+'.obj')
+            # if frameid>100:print(simulator.v[199])
         ps.frame_tick()
         frameid += 1
-        if(frameid==500):exit()
 
 Main('./assets/quad01_2.obj',True)
