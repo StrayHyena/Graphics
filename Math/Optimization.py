@@ -367,7 +367,7 @@ class AugmentedLagrangianMethod:
         xs = np.array([x0])
         mu  = np.zeros(len(ineq_cons))
 
-        # P319 (7.2.12) 第二行的项
+        # P319 (7.2.12) 第二行的项  注意现在只公式里关注i∈I的部分
         penalty = lambda x: sum([ max(mu[i]/sigma + c(x),0)**2 - (mu[i]/sigma)**2  for i,c in enumerate(ineq_cons)])
         # P319 最后一个公式 衡量违反程度
         violation = lambda x: math.sqrt(sum( [max(c(x),-mu[i]/sigma)**2 for i,c in enumerate(ineq_cons)] ) )
@@ -416,7 +416,7 @@ class AugmentedLagrangianMethod:
         
             pts = GradientMethod.GD( object_func ,x,threshold=eta )
         
-            x = pts[-1][:2]
+            x = pts[-1][:2] # 这里的2是因为，测试的x是二维的（2个自由度）
             xs = np.concatenate((xs,[x]))
         
             if pts is not None and  violation(x)<epsilon:
