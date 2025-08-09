@@ -429,6 +429,10 @@ class ImpactZone:
         def ci(self,i,x):
             x,impact = x.reshape(self.vn,3),self.impacts[i]
             return impact.d+sum([np.dot(impact.n,impact.w[i]*x[self.vid2i[vid]]) for i,vid in enumerate(impact.idx)])
+        def gradci(self,i,x):
+            imp,ret = self.impacts[i],np.zeros_like(x).reshape(self.vn,3)
+            for i,vid in enumerate(imp.idx):ret[self.vid2i[vid]] = imp.w[i]*imp.n
+            return ret.flatten()
         def Solve(self):
             self.idx = sorted(list(self.idx))
             self.vn, self.cn = len(self.idx), len(self.impacts)
