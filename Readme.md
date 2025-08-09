@@ -61,7 +61,7 @@ Taichi -- 1.7.3
 - Robust Treatment of Collisions, Contact and Friction for Cloth Animation
 - Derivation of discrete bending forces and their gradients
 - Optimized Spatial Hashing for Collision Detection of Deformable Objects  
-<img src="./results/quad2_collision_harden.gif" alt="show" />  
+<img src="./results/quad2_collision.gif" alt="show" />  
 
 
 
