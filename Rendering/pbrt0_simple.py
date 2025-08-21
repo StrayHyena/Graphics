@@ -1,7 +1,7 @@
 import taichi as ti
 import taichi.math as tm
 import numpy as np
-import trimesh,enum
+import trimesh,enum,time
 
 ti.init(arch=ti.cpu,default_fp  =ti.f64,debug=True)
 Array   = ti.types.vector( 200  ,ti.i32)
@@ -258,6 +258,7 @@ class Camera:
         self.unit_x = right * 2. * near_plane * fov / (WIDTH - 1);
         self.unit_y = up * 2. * near_plane * fov / (HEIGHT - 1);
 
+@ti.data_oriented
 class BVH:
     @ti.dataclass
     class Node:
@@ -275,39 +276,42 @@ class BVH:
         vn,fn = len(vertices),len(faces)
         self.nodes = self.Node.field(shape = fn*2)
         self.tidx = ti.field(ti.i32,fn)
-        self.aabbs = []
-        self.centroids = []
-        for i in range(fn*2):
-            self.nodes[i] = self.Node(min=MAX3,max=-MAX3,li=INone,ri=INone,start=INone,end=INone)
+        self.aabbs,self.centroids = [],[]
         for i in range(fn):
-            self.tidx[i] = i
             self.aabbs.append((np.min(vertices[faces[i]],axis=0),np.max(vertices[faces[i]],axis=0)))
             self.centroids.append(np.mean(vertices[faces[i]],axis=0))
+        self.tid = np.arange(fn)
+        self.mins,self.maxs,self.lis,self.ris,self.starts,self.ends = np.ones((fn*2,3))*MAX,-np.ones((fn*2,3))*MAX,-np.ones(fn*2,dtype=int),-np.ones(fn*2,dtype=int),-np.ones(fn*2,dtype=int),-np.ones(fn*2,dtype=int)
         self.Build(0,0,fn)
+        self.tidx.from_numpy(self.tid)
+        self.InitNodes(self.mins,self.maxs,self.lis,self.ris,self.starts,self.ends)
+
+    @ti.kernel
+    def InitNodes(self,mins:ti.types.ndarray(dtype = vec3,ndim=1),maxs:ti.types.ndarray(dtype = vec3,ndim=1),lis:ti.types.ndarray(),ris:ti.types.ndarray(),starts:ti.types.ndarray(),ends:ti.types.ndarray()):
+        for i in ti.grouped(mins):self.nodes[i] = self.Node(min=mins[i],max=maxs[i],li=lis[i],ri=ris[i],start=starts[i],end=ends[i])
 
     def Build(self,node_idx,start,end):  #[start,end)
         def AABBArea(box):
             extend = box[1] - box[0]
             return extend[0] * extend[1] + extend[2] * extend[1] + extend[0] * extend[2]
         bin_cnt = 8
-        node = self.nodes[node_idx]
         split_axis, split_pos, split_cost = INone, INone, MAX
         left_count, right_count = 0, 0
         for i in range(start, end):
-            node.min = ti.min(node.min,self.aabbs[self.tidx[i]][0])
-            node.max = ti.max(node.max,self.aabbs[self.tidx[i]][1])
+            self.mins[node_idx] =  np.minimum(self.mins[node_idx],self.aabbs[self.tid[i]][0])
+            self.maxs[node_idx] =  np.maximum(self.maxs[node_idx],self.aabbs[self.tid[i]][1])
         for j in range(3):
             boundsMin, boundsMax = MAX, -MAX
             for i in range(start, end):
-                boundsMin = min(boundsMin, self.centroids[self.tidx[i]][j])
-                boundsMax = max(boundsMax, self.centroids[self.tidx[i]][j])
+                boundsMin = min(boundsMin, self.centroids[self.tid[i]][j])
+                boundsMax = max(boundsMax, self.centroids[self.tid[i]][j])
             if boundsMin == boundsMax: continue
             stride = (boundsMax - boundsMin) / bin_cnt
             bins = [[MAX3, -MAX3, 0] for _ in range(bin_cnt)]
             for i in range(start, end):
-                bin_idx = min(bin_cnt - 1, int((self.centroids[self.tidx[i]][j] - boundsMin) / stride))
-                bins[bin_idx][0] = ti.min(bins[bin_idx][0],self.aabbs[self.tidx[i]][0])
-                bins[bin_idx][1] = ti.max(bins[bin_idx][1],self.aabbs[self.tidx[i]][1])
+                bin_idx = min(bin_cnt - 1, int((self.centroids[self.tid[i]][j] - boundsMin) / stride))
+                bins[bin_idx][0] = ti.min(bins[bin_idx][0],self.aabbs[self.tid[i]][0])
+                bins[bin_idx][1] = ti.max(bins[bin_idx][1],self.aabbs[self.tid[i]][1])
                 bins[bin_idx][2] += 1
 
             left_area = [0.0 for _ in range(bin_cnt - 1)]
@@ -336,17 +340,17 @@ class BVH:
                     split_axis, split_pos, split_cost = j, boundsMin + stride * (i + 1), cost
                     left_count, right_count = left_cnt[i], right_cnt[i]
                     assert (left_count + right_count == end - start )
-        if left_count == 0 or right_count == 0 or AABBArea([node.min,node.max]) * (end - start ) <= split_cost:
-            node.start, node.end = start, end
+        if left_count == 0 or right_count == 0 or AABBArea([self.mins[node_idx],self.maxs[node_idx]]) * (end - start ) <= split_cost:
+            self.starts[node_idx], self.ends[node_idx] = start, end
             return 1
         l, r = start, end-1
         while l < r:
-            if self.centroids[self.tidx[l]][split_axis] <= split_pos:   l += 1
-            else:  self.tidx[l], self.tidx[r], r = self.tidx[r], self.tidx[l], r - 1
-        node.li = node_idx + 1
-        lchildren_num = self.Build(node.li, start, start + left_count)
-        node.ri = node.li + lchildren_num
-        rchildren_num = self.Build(node.ri, start + left_count, end)
+            if self.centroids[self.tid[l]][split_axis] <= split_pos:   l += 1
+            else:  self.tid[l], self.tid[r], r = self.tid[r], self.tid[l], r - 1
+        self.lis[node_idx] = node_idx + 1
+        lchildren_num = self.Build(self.lis[node_idx], start, start + left_count)
+        self.ris[node_idx] =self.lis[node_idx] + lchildren_num
+        rchildren_num = self.Build(self.ris[node_idx], start + left_count, end)
         return lchildren_num + rchildren_num + 1
 
 @ti.data_oriented
@@ -383,7 +387,9 @@ class Scene:
                 self.face_doubleside[foffset + fi] = not m.is_watertight
             voffset += len(m.vertices)
             foffset += len(m.faces)
+        st = time.time()
         self.bvh = BVH(self.vertices.to_numpy(),self.faces.to_numpy())
+        print('bvh build cost ',time.time()-st,' fn is ',self.faces.shape[0])
 
     @ti.func
     def HitBy(self,ray):
