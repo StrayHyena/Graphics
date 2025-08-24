@@ -13,9 +13,9 @@ Material = ti.types.struct(albedo=vec3,Le = vec3,mdm=Medium,type=ti.i32,ax=ti.f6
 FLAT = False # flat shading
 WIDTH,HEIGHT = 400,400
 EPS = 1e-8
-MAX = 1.7976931348623157e+308
-NOHIT = MAX
-MAX3 = vec3(MAX,MAX,MAX)
+inf = 1.7976931348623157e+308
+NOHIT = inf
+MAX3 = vec3(inf,inf,inf)
 FNone,  INone,   = -1.0,  -1
 # https://refractiveindex.info/  R 630 nm ,G 532 nm ,B 465 nm
 Air,Glass,Gold = Medium(eta=vec3(1),k=vec3(0)),Medium(eta=vec3(1.5),k=vec3(0)),Medium(eta=vec3(0.18836,0.54386,1.3319),k=vec3(3.4034,2.2309,1.8693))
@@ -175,7 +175,7 @@ class BxDF:
     def Sample(ix:Interaction):
         assert ix.ray.mdm.eta.sum() != 0
         N,T,n = ix.normal,ix.tangent,vec3(0,1,0)  # N: world normal, T: world tangent, n: local normal
-        wo,wi,pdf,f = BxDF.ToLocal(-ix.ray.d,N,T).normalized(),vec3(0),0.,vec3(MAX,0,0) # use MAX RED to expose problem
+        wo,wi,pdf,f = BxDF.ToLocal(-ix.ray.d,N,T).normalized(),vec3(0),0.,vec3(inf,0,0) # use inf RED to expose problem
         next_ix_inside_mesh = ix.inside_mesh # next intersection inside mesh : default is same with current
         if ix.mat.type==BxDF.Type.Lambertian:
             wi = BxDF.CosineSampleHemisphere()
@@ -262,96 +262,75 @@ class Camera:
 class BVH:
     @ti.dataclass
     class Node:
-        min:vec3
-        max:vec3
-        li:ti.i32
-        ri:ti.i32
-        start:ti.i32
-        end:ti.i32
+        min:vec3             # aabb's min for this node
+        max:vec3             # aabb's max for this node
+        li:ti.i32            # left child index   (similar to  a pointer to node)
+        ri:ti.i32            # right child index  (similar to  a pointer to node)
+        start:ti.i32         # begin of triangle indices
+        end:ti.i32           # end of triangle indices   P.S. triangle range [start,end]
         @ti.func
-        def Leaf(self):
-            return self.li==INone and self.ri==INone
-
-    def __init__(self,vertices,faces):
-        vn,fn = len(vertices),len(faces)
-        self.nodes = self.Node.field(shape = fn*2)
-        self.tidx = ti.field(ti.i32,fn)
-        self.aabbs,self.centroids = [],[]
-        for i in range(fn):
-            self.aabbs.append((np.min(vertices[faces[i]],axis=0),np.max(vertices[faces[i]],axis=0)))
-            self.centroids.append(np.mean(vertices[faces[i]],axis=0))
-        self.tid = np.arange(fn)
-        self.mins,self.maxs,self.lis,self.ris,self.starts,self.ends = np.ones((fn*2,3))*MAX,-np.ones((fn*2,3))*MAX,-np.ones(fn*2,dtype=int),-np.ones(fn*2,dtype=int),-np.ones(fn*2,dtype=int),-np.ones(fn*2,dtype=int)
-        self.Build(0,0,fn)
-        self.tidx.from_numpy(self.tid)
-        self.InitNodes(self.mins,self.maxs,self.lis,self.ris,self.starts,self.ends)
-
-    @ti.kernel
-    def InitNodes(self,mins:ti.types.ndarray(dtype = vec3,ndim=1),maxs:ti.types.ndarray(dtype = vec3,ndim=1),lis:ti.types.ndarray(),ris:ti.types.ndarray(),starts:ti.types.ndarray(),ends:ti.types.ndarray()):
-        for i in ti.grouped(mins):self.nodes[i] = self.Node(min=mins[i],max=maxs[i],li=lis[i],ri=ris[i],start=starts[i],end=ends[i])
-
-    def Build(self,node_idx,start,end):  #[start,end)
-        def AABBArea(box):
-            extend = box[1] - box[0]
-            return extend[0] * extend[1] + extend[2] * extend[1] + extend[0] * extend[2]
-        bin_cnt = 8
-        split_axis, split_pos, split_cost = INone, INone, MAX
-        left_count, right_count = 0, 0
-        for i in range(start, end):
-            self.mins[node_idx] =  np.minimum(self.mins[node_idx],self.aabbs[self.tid[i]][0])
-            self.maxs[node_idx] =  np.maximum(self.maxs[node_idx],self.aabbs[self.tid[i]][1])
-        for j in range(3):
-            boundsMin, boundsMax = MAX, -MAX
-            for i in range(start, end):
-                boundsMin = min(boundsMin, self.centroids[self.tid[i]][j])
-                boundsMax = max(boundsMax, self.centroids[self.tid[i]][j])
-            if boundsMin == boundsMax: continue
-            stride = (boundsMax - boundsMin) / bin_cnt
-            bins = [[MAX3, -MAX3, 0] for _ in range(bin_cnt)]
-            for i in range(start, end):
-                bin_idx = min(bin_cnt - 1, int((self.centroids[self.tid[i]][j] - boundsMin) / stride))
-                bins[bin_idx][0] = ti.min(bins[bin_idx][0],self.aabbs[self.tid[i]][0])
-                bins[bin_idx][1] = ti.max(bins[bin_idx][1],self.aabbs[self.tid[i]][1])
-                bins[bin_idx][2] += 1
-
-            left_area = [0.0 for _ in range(bin_cnt - 1)]
-            left_cnt = [0 for _ in range(bin_cnt - 1)]
-            left_box = [MAX3, -MAX3]
-            left_sum = 0
-            right_area = [0.0 for _ in range(bin_cnt - 1)]
-            right_cnt = [0 for _ in range(bin_cnt - 1)]
-            right_box = [MAX3, -MAX3]
-            right_sum = 0
-            for i in range(bin_cnt - 1):
-                left_box[0] = ti.min(left_box[0],bins[i][0])
-                left_box[1] = ti.max(left_box[1],bins[i][1])
-                left_area[i] = AABBArea(left_box)
-                left_sum += bins[i][2]
-                left_cnt[i] = left_sum
-
-                right_box[0] = ti.min(right_box[0],bins[bin_cnt - i - 1][0])
-                right_box[1] = ti.max(right_box[1],bins[bin_cnt - i - 1][1])
-                right_area[bin_cnt - i - 2] = AABBArea(right_box)
-                right_sum += bins[bin_cnt - i - 1][2]
-                right_cnt[bin_cnt - i - 2] = right_sum
-            for i in range(bin_cnt - 1):
-                cost = left_area[i] * left_cnt[i] + right_area[i] * right_cnt[i]
-                if cost < split_cost:
-                    split_axis, split_pos, split_cost = j, boundsMin + stride * (i + 1), cost
-                    left_count, right_count = left_cnt[i], right_cnt[i]
-                    assert (left_count + right_count == end - start )
-        if left_count == 0 or right_count == 0 or AABBArea([self.mins[node_idx],self.maxs[node_idx]]) * (end - start ) <= split_cost:
-            self.starts[node_idx], self.ends[node_idx] = start, end
-            return 1
-        l, r = start, end-1
-        while l < r:
-            if self.centroids[self.tid[l]][split_axis] <= split_pos:   l += 1
-            else:  self.tid[l], self.tid[r], r = self.tid[r], self.tid[l], r - 1
-        self.lis[node_idx] = node_idx + 1
-        lchildren_num = self.Build(self.lis[node_idx], start, start + left_count)
-        self.ris[node_idx] =self.lis[node_idx] + lchildren_num
-        rchildren_num = self.Build(self.ris[node_idx], start + left_count, end)
-        return lchildren_num + rchildren_num + 1
+        def Leaf(self): return self.li==INone and self.ri==INone
+    # https://developer.nvidia.com/blog/thinking-parallel-part-iii-tree-construction-gpu/
+    def __init__(self,aabbs):  # aabbs : (box mins(ndarray),box maxs(ndarray))
+        n = len(aabbs[0])
+        self.nodes = self.Node.field(shape = n*2)
+        self.idx = ti.field(ti.i32,n) # element idx . (triangle index)
+        # 归一化vertices到[0,1] 为了后面的Morton code
+        centroids = 0.5*(aabbs[0]+aabbs[1])
+        centroids -= np.min(centroids,axis=0)
+        centroids /= np.max(centroids,axis=0)
+        def ExpandBits(v: int) -> int:
+            v = (v * 0x00010001) & 0xFF0000FF
+            v = (v * 0x00000101) & 0x0F00F00F
+            v = (v * 0x00000011) & 0xC30C30C3
+            v = (v * 0x00000005) & 0x49249249
+            return v
+        def Morton3D(pos):
+            x, y, z = pos
+            assert 0 <= x <= 1 and 0 <= y <= 1 and 0 <= z <= 1
+            x = min(max(x * 1024.0, 0.0), 1023.0)
+            y = min(max(y * 1024.0, 0.0), 1023.0)
+            z = min(max(z * 1024.0, 0.0), 1023.0)
+            xx = ExpandBits(int(x))
+            yy = ExpandBits(int(y))
+            zz = ExpandBits(int(z))
+            return (xx << 2) | (yy << 1) | zz
+        mortons = np.array([Morton3D(pos) for pos in centroids])
+        sorted_idx    = np.argsort(mortons)
+        sorted_mortons = mortons[sorted_idx]
+        self.idx.from_numpy(sorted_idx)
+        node_type =  np.dtype([('min', np.float64, (3,)),('max', np.float64, (3,)),('li',np.int32),('ri',np.int32),('start',np.int32),('end',np.int32)])
+        nodes = np.empty(n*2, dtype=node_type)
+        nodes[:] = ([inf,inf,inf],[-inf,-inf,-inf],INone,INone,INone,INone)
+        #  now build tree  --------------------------------------------------------------------------
+        def LeadingZeros(x):return 32 if x==0 else (31 - int(x).bit_length())
+        def FindSplit(sorted_morton_codes, first, last):
+            if sorted_morton_codes[first] == sorted_morton_codes[last]:return (first + last) // 2
+            common_prefix = LeadingZeros(sorted_morton_codes[first] ^ sorted_morton_codes[last])
+            split = first
+            step = last - first
+            while step > 1:
+                step = (step + 1) // 2
+                new_split = split + step
+                if new_split < last:
+                    split_code = sorted_morton_codes[new_split]
+                    split_prefix = LeadingZeros(sorted_morton_codes[first] ^ split_code)
+                    if split_prefix > common_prefix:split = new_split
+            return split
+        def BuildTree(node_idx, start_idx, end_idx):  # return nodes number(childs + this), 并且会在node_idx处初始化node
+            nonlocal nodes,sorted_idx,sorted_mortons,aabbs
+            if start_idx == end_idx:
+                nodes[node_idx] =  (aabbs[0][sorted_idx[start_idx]],aabbs[1][sorted_idx[start_idx]],INone,INone,start_idx,end_idx)
+                return 1
+            split = FindSplit(sorted_mortons, start_idx, end_idx)
+            li = node_idx+1
+            lcnt = BuildTree(li,start_idx,split)
+            ri = li + lcnt
+            rcnt = BuildTree(ri,split+1,end_idx)
+            nodes[node_idx] = (np.minimum(nodes[li]['min'],nodes[ri]['min']),np.maximum(nodes[li]['max'],nodes[ri]['max']),li,ri,start_idx,end_idx)
+            return lcnt+rcnt+1
+        BuildTree(0,0,n-1)
+        self.nodes.from_numpy(nodes)
 
 @ti.data_oriented
 class Scene:
@@ -387,24 +366,27 @@ class Scene:
                 self.face_doubleside[foffset + fi] = not m.is_watertight
             voffset += len(m.vertices)
             foffset += len(m.faces)
+        vtx,tris = self.vertices.to_numpy(),self.faces.to_numpy()
         st = time.time()
-        self.bvh = BVH(self.vertices.to_numpy(),self.faces.to_numpy())
-        print('bvh build cost ',time.time()-st,' fn is ',self.faces.shape[0])
+        self.bvh = BVH(( np.min(vtx[tris] , axis=1), np.max(vtx[tris], axis=1)  ))
+        print('bvh build cost ',time.time()-st,' n is ',self.faces.shape[0])
 
     @ti.func
     def HitBy(self,ray):
         t, triidx = NOHIT, INone
-        s, i = Array([INone for _ in range(Array.n)]), 0
+        s, i = Array([INone for _ in range(Array.n)]), 0  # i: stack's current size
         s[0] = 0
         while i>=0:
             if i >= Array.n: print("Exceed stack's max size  ")
             node = self.bvh.nodes[s[i]]
             i -= 1
+            # print(i)
             if node.Leaf():
-                for j in range(node.start, node.end ):
-                    tri = self.faces[self.bvh.tidx[j]]
-                    this_t = ray.HitTriangle(self.vertices[tri[0]], self.vertices[tri[1]], self.vertices[tri[2]])
-                    if this_t < t: t, triidx = this_t, self.bvh.tidx[j]
+                assert node.start==node.end
+                j = node.start
+                tri = self.faces[self.bvh.idx[j]]
+                this_t = ray.HitTriangle(self.vertices[tri[0]], self.vertices[tri[1]], self.vertices[tri[2]])
+                if this_t < t: t, triidx = this_t, self.bvh.idx[j]
             else:
                 i0, i1 = node.li, node.ri
                 n0, n1 = self.bvh.nodes[i0], self.bvh.nodes[i1]
