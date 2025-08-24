@@ -380,13 +380,11 @@ class Scene:
             if i >= Array.n: print("Exceed stack's max size  ")
             node = self.bvh.nodes[s[i]]
             i -= 1
-            # print(i)
             if node.Leaf():
                 assert node.start==node.end
-                j = node.start
-                tri = self.faces[self.bvh.idx[j]]
+                tri = self.faces[self.bvh.idx[node.start]]
                 this_t = ray.HitTriangle(self.vertices[tri[0]], self.vertices[tri[1]], self.vertices[tri[2]])
-                if this_t < t: t, triidx = this_t, self.bvh.idx[j]
+                if this_t < t: t, triidx = this_t, self.bvh.idx[node.start]
             else:
                 i0, i1 = node.li, node.ri
                 n0, n1 = self.bvh.nodes[i0], self.bvh.nodes[i1]
