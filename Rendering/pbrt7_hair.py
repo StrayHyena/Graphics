@@ -17,7 +17,76 @@ inf3,nan3,INone = vec3(inf),vec3(nan),-1
 # https://refractiveindex.info/  R 630 nm ,G 532 nm ,B 465 nm
 Air,Glass,Gold = Medium(eta=vec3(1),k=vec3(0)),Medium(eta=vec3(1.5),k=vec3(0)),Medium(eta=vec3(0.18836,0.54386,1.3319),k=vec3(3.4034,2.2309,1.8693))
 MdmNone = Medium(eta=vec3(0))
-stack_n = 11
+BEZIER_STACK_N = 11
+
+@ti.dataclass
+class Ray:
+    o:vec3
+    d:vec3
+    mdm:Medium
+    @ti.func
+    def At(self, t):return self.o+self.d*t
+    @ti.func
+    def HitTriangle(self,v0,v1,v2):
+        ret = NOHIT
+        e0,e1 = v1-v0,v2-v0
+        h = self.d.cross(e1)
+        a = e0.dot(h)
+        if ti.abs(a) > EPS:
+            f,s = 1/a,self.o-v0
+            u = f*s.dot(h)
+            q = s.cross(e0)
+            v = f*q.dot(self.d)
+            t = f*e1.dot(q)
+            if 0<=u<=1 and 0<=v<=1 and u+v<=1 and t>EPS: ret = t
+        return ret
+    @ti.func
+    def HitAABB(self,bmin,bmax):
+        t_enter,t_exit,t,isHit,originInsideBox = -NOHIT,NOHIT,NOHIT,True,True
+        for i in ti.static(range(3)):
+            if self.o[i]<bmin[i] or self.o[i]>bmax[i]: originInsideBox = False
+            if self.d[i]==0:
+                if bmin[i]>self.o[i] or self.o[i]>bmax[i] : isHit = False
+            else:
+                t0,t1 = (bmin[i]-self.o[i])/self.d[i],(bmax[i]-self.o[i])/self.d[i]
+                if self.d[i]<0:t0,t1=t1,t0
+                t_enter,t_exit = max(t_enter,t0),min(t_exit,t1)
+        if t_enter<=t_exit and t_exit>=0: t = t_enter if t_enter>=0 else t_exit
+        return -1.0 if originInsideBox else (t if isHit else NOHIT)
+
+@ti.dataclass
+class Interaction:
+    t:ti.f64    # hit time of ray
+    ci:ti.i32   # curve index
+    ray:Ray
+    u:ti.f64    # surface parameter coordinate u component  [0,1]
+    v:ti.f64    # surface parameter coordinate v component  [-1,1]
+    tangent:vec3  # local farme -- x Axis
+    normal:vec3   # local farme -- y Axis
+    bitangent:vec3
+    pos:vec3      # hit position
+    mat:Material
+    # inside_mesh:ti.u1
+    # mdmT:Medium
+    @ti.func
+    def Valid(self):return self.t!=NOHIT
+    @ti.func
+    def Init(self,scene):
+        if self.Valid():
+            self.mat = Material(albedo=vec3(0.3,0.6,0.9),Le=vec3(0),mdm = MdmNone,type=BxDF.Type.Lambertian)
+            self.pos,bezier = self.ray.At(self.t),scene.hair[self.ci]
+            dx = self.ray.d.cross(bezier.p3 - bezier.p0)
+            if dx.norm() < 1e-20: dx, _ = Utils.CoordinateSystem(self.ray.d)
+            w2r = Utils.LookAt(self.ray.o, self.ray.o + self.ray.d,dx)  # world space to ray space. NOTE that curve's space is identical to world space
+            curvepos,tangent,width = bezier.At(self.u), bezier.TangentAt(self.u).normalized(),tm.mix(bezier.w[0],bezier.w[1],self.u)
+            curveposR,tangentR = (w2r@vec4(curvepos,1)).xyz,(w2r@vec4(tangent,0)).xyz
+            # 右手坐标系，tanget是+x ; normal +y; bitangent +z
+            self.v = -(curvepos-self.pos).norm()/width  # 默认在曲线右边，是个负值 (在z轴上)
+            if tangentR.x * -curveposR.y + curveposR.x * tangentR.y > 0: self.v=-self.v # Edge Function: 在tangent左边的话是正值
+            bitangentR = (tm.rot_by_axis(tangentR,-tm.asin(self.v))@vec4(-tangentR.y,tangentR.x,0,0)).xyz
+            self.tangent,self.bitangent = tangent,(w2r.inverse()@vec4(bitangentR,0)).xyz.normalized()
+            self.normal = self.bitangent.cross(self.tangent).normalized()
+        return self
 
 @ti.dataclass
 class NodeStack:  # node stack for bvh tree traversal
@@ -36,8 +105,8 @@ class NodeStack:  # node stack for bvh tree traversal
         return self.node_idxs[self.n],self.ts[self.n]
 
 @ti.dataclass
-class BezierStack:                            # 0   1   2  ...  9    10  11  12 13 14
-    stack:ti.types.vector(15*stack_n,ti.f64)  # p0x p0y p0z ... p3x p3y p3z  u0 u1 depth   // u0,u1是 p0,p3处的(在深度为0的那个bezier的)参数坐标
+class BezierStack:                                   # 0   1   2  ...  9    10  11  12 13 14
+    stack:ti.types.vector(15*BEZIER_STACK_N,ti.f64)  # p0x p0y p0z ... p3x p3y p3z  u0 u1 depth   // u0,u1是 p0,p3处的(在深度为0的那个bezier的)参数坐标
     n:ti.i32
     @ti.func
     def Push(self,p0,p1,p2,p3,u,depth):
@@ -51,7 +120,7 @@ class BezierStack:                            # 0   1   2  ...  9    10  11  12 
         self.stack[self.n*stride+13] = u[1]
         self.stack[self.n*stride+stride-1] = ti.cast(depth,ti.f64)
         self.n+=1
-        if self.n>stack_n:print('ERROR: bezier stack too big :',self.n)
+        if self.n>BEZIER_STACK_N:print('ERROR: bezier stack too big :',self.n)
     @ti.func
     def Pop(self):
         stride = 15
@@ -93,16 +162,16 @@ class Bezier:
         self.bmax += vec3(self.w.max())
         return self
     @ti.func
-    def HitBy(self,o,d):  # return ray's t
-        ret = NOHIT
-        dx = d.cross(self.p3 - self.p0)
-        if dx.norm() < 1e-20: dx, _ = Utils.CoordinateSystem(d)
-        w2v = Utils.LookAt(o, o + d, dx)
-        # camera space control points
-        p0, p1, p2, p3 = (w2v @ vec4(self.p0, 1)).xyz, (w2v @ vec4(self.p1, 1)).xyz, (w2v @ vec4(self.p2, 1)).xyz, (w2v @ vec4(self.p3, 1)).xyz
+    def HitBy(self,ray)->Interaction:
+        ret = (NOHIT,inf) # t,u
+        dx = ray.d.cross(self.p3 - self.p0)
+        if dx.norm() < 1e-20: dx, _ = Utils.CoordinateSystem(ray.d)
+        w2r = Utils.LookAt(ray.o, ray.o + ray.d, dx)  #world space to ray space. NOTE that curve's space is identical to world space
+        # ray space control points
+        p0, p1, p2, p3 = (w2r @ vec4(self.p0, 1)).xyz, (w2r @ vec4(self.p1, 1)).xyz, (w2r @ vec4(self.p2, 1)).xyz, (w2r @ vec4(self.p3, 1)).xyz
         stack,found_intersect = BezierStack(),False
         stack.Push(p0, p1, p2, p3,vec2(0,1),0)
-        while stack.n > 0 and not found_intersect:
+        while stack.n > 0 and ret[0]==NOHIT:
             p0, p1, p2, p3,u, depth = stack.Pop()
             width = vec2(ti.math.mix(self.w[0],self.w[1],u[0]),ti.math.mix(self.w[0],self.w[1],u[1]))
             bezier = Bezier(p0=p0,p1=p1,p2=p2,p3=p3,w=width).Init()  # ray space bezier
@@ -112,83 +181,13 @@ class Bezier:
                     stack.Push(0.125*(p0+3*p1+3*p2+p3),0.25*(p1+2*p2+p3),0.5*(p2+p3),p3,vec2(u.sum()/2,u[1]),depth+1)
             else:  # check curve intersect
                 if (p1.y - p0.y)*-p0.y + p0.x * (p0.x - p1.x) < 0 or (p2.y - p3.y) * -p3.y + p3.x * (p3.x - p2.x)<0:continue
-                w = (p3.xy-p0.xy).dot(-p0.xy)/(p3.xy-p0.xy).norm_sqr()  # w ∈ [0,1]
-                if bezier.At(w).xy.norm_sqr() > ti.math.mix(width[0],width[1],w)**2: continue
-                root_u = ti.math.mix(u[0],u[1],w)
-                ret,found_intersect = bezier.At(w).z,True
+                uH = (p3.xy-p0.xy).dot(-p0.xy)/(p3.xy-p0.xy).norm_sqr()  # hitU ∈ [0,1]
+                hitpos_ray_space = bezier.At(uH)
+                if  hitpos_ray_space.xy.norm_sqr() > ti.math.mix(width[0],width[1],uH)**2 : continue
+                ret[0],ret[1] = hitpos_ray_space.z,ti.math.mix(u[0],u[1],uH)  # 最顶层的bezier的参数坐标
         return ret
-
-@ti.dataclass
-class Ray:
-    o:vec3
-    d:vec3
-    mdm:Medium
-    @ti.func
-    def At(self, t):return self.o+self.d*t
-    @ti.func
-    def HitTriangle(self,v0,v1,v2):
-        ret = NOHIT
-        e0,e1 = v1-v0,v2-v0
-        h = self.d.cross(e1)
-        a = e0.dot(h)
-        if ti.abs(a) > EPS:
-            f,s = 1/a,self.o-v0
-            u = f*s.dot(h)
-            q = s.cross(e0)
-            v = f*q.dot(self.d)
-            t = f*e1.dot(q)
-            if 0<=u<=1 and 0<=v<=1 and u+v<=1 and t>EPS: ret = t
-        return ret
-    @ti.func
-    def HitAABB(self,bmin,bmax):
-        t_enter,t_exit,t,isHit,originInsideBox = -NOHIT,NOHIT,NOHIT,True,True
-        for i in ti.static(range(3)):
-            if self.o[i]<bmin[i] or self.o[i]>bmax[i]: originInsideBox = False
-            if self.d[i]==0:
-                if bmin[i]>self.o[i] or self.o[i]>bmax[i] : isHit = False
-            else:
-                t0,t1 = (bmin[i]-self.o[i])/self.d[i],(bmax[i]-self.o[i])/self.d[i]
-                if self.d[i]<0:t0,t1=t1,t0
-                t_enter,t_exit = max(t_enter,t0),min(t_exit,t1)
-        if t_enter<=t_exit and t_exit>=0: t = t_enter if t_enter>=0 else t_exit
-        return -1.0 if originInsideBox else (t if isHit else NOHIT)
 
 Sample   = ti.types.struct(pdf=ti.f64, ray=Ray, value=vec3) # bxdf sample or phase function sample. value is bxdf value or phase function value
-
-@ti.dataclass
-class Interaction:
-    t:ti.f64
-    fi:ti.i32
-    ray:Ray
-    normal:vec3
-    tangent:vec3
-    pos:vec3
-    mat:Material
-    inside_mesh:ti.u1
-    mdmT:Medium
-    @ti.func
-    def Valid(self):return self.t!=NOHIT
-    @ti.func
-    def FetchInfo(self,scene):
-        if self.Valid():
-            self.pos = self.ray.At(self.t)
-            face,area = scene.faces[self.fi],scene.face_areas[self.fi]
-            ws = vec3(0)
-            for i in ti.static(range(3)):
-                j,k = (i+1)%3,(i+2)%3
-                ws[i] = (self.pos-scene.vertices[face[j]]).cross(self.pos-scene.vertices[face[k]]).norm()/2/area
-            self.normal = (ws[0]*scene.vertex_normals[face[0]]+ws[1]*scene.vertex_normals[face[1]]+ws[2]*scene.vertex_normals[face[2]]).normalized()
-            t = (ws[0]*scene.vertex_tangents[face[0]]+ws[1]*scene.vertex_tangents[face[1]]+ws[2]*scene.vertex_tangents[face[2]]).normalized()
-            self.tangent = self.normal.cross(t.cross(self.normal)).normalized() # force orthogonal because  t is interpolated tangent , that may not perpendicular to self.normal
-            if FLAT: self.normal,self.tangent = scene.face_normals[self.fi],scene.face_tangents[self.fi]
-            self.mat = scene.face_materials[self.fi]
-            self.inside_mesh = False if (self.ray.mdm.eta - Air.eta).norm()==0 else True  #注意，不能用法线判断。因为如果不是平坦着色，插值结果可能不对。当然，这么做的前提是每次生成光线时的mdm要给的是对的
-            self.mdmT = self.mat.mdm  # transmission medium
-            if self.inside_mesh:self.mdmT = Air
-            if scene.face_doubleside[self.fi]:
-                self.inside_mesh = False
-                if self.ray.d.dot(self.normal)>0:self.normal *= -1  #对于双面的面片，法线总是朝向光线的起点。
-        return self
 
 class BxDF:
     class Type(enum.IntEnum):
@@ -473,14 +472,9 @@ class Scene:
             self.curve_bmin[i] = self.hair[i].bmin
             self.curve_bmax[i] = self.hair[i].bmax
 
-    # 光线与AABB的相交，有两种情况：a.光线起点就在AABB内部,这时会返回-1.0  b.光线起点在AABB外部，这时返回相交时的time  (see Ray.HitAABB)
-    # 函数里的t是光线与某个curve(不是AABB)的交点t。如果stack里有任何 node_t >= t，此时都可以提前拒绝(即continue)
-    # 进一步解释，node_t>=t 说明ray.o在此node之外,任何node之内的元素与ray的交点都比t要大，所以可以提前拒绝
-    # 对于else语句，想法是，总是加入先被ray hit的node. (以期待后续的early reject)
-    # 当然，如果ray.o本身就在某个node之内，要先Push此node (其实这也是为啥ray.HitAABB的a情况要返回一个负数)
     @ti.func
     def HitBy(self,ray):
-        t, triidx = NOHIT, INone
+        t, curve_idx,hit_u = NOHIT, INone,nan
         stack = NodeStack()
         stack.Push(0,ray.HitAABB(self.bvh.nodes[0].min,self.bvh.nodes[0].max))
         while stack.n>0:
@@ -489,35 +483,33 @@ class Scene:
             node = self.bvh.nodes[node_idx]
             if node.Leaf():
                 bezier = self.hair[self.bvh.idx[node.start]]
-                this_t = bezier.HitBy(ray.o,ray.d)
-                if this_t < t: t, curve_idx = this_t, self.bvh.idx[node.start]
+                this_t,this_u = bezier.HitBy(ray)
+                if this_t < t: t, curve_idx,hit_u = this_t, self.bvh.idx[node.start],this_u
             else:
                 i0, i1 = node.li, node.ri
                 n0, n1 = self.bvh.nodes[i0], self.bvh.nodes[i1]
                 t0, t1 = ray.HitAABB(n0.min,n0.max), ray.HitAABB(n1.min,n1.max)
-                if t0!=NOHIT and t1!=NOHIT:
-                    if t1<t0: i0,i1,t0,t1 = i1,i0,t1,t0
-                if t0!=NOHIT: stack.Push(i0,t0)
+                if t1<t0: i0,i1,t0,t1 = i1,i0,t1,t0
                 if t1!=NOHIT: stack.Push(i1,t1)
-        return  t #Interaction(t,triidx,ray).FetchInfo(self)
+                if t0!=NOHIT: stack.Push(i0,t0)
+        return  Interaction(t,curve_idx,ray,hit_u).Init(self)
 
     @ti.kernel
     def Draw(self):
         for i,j in self.img:
             o = self.camera.origin + (i+ti.random()/2-1)*self.camera.unit_x + (j+ti.random()/2-1)*self.camera.unit_y
             ray = Ray(o=o,d = (o-self.camera.pos).normalized(),mdm=Air)
-            #https://pbr-book.org/4ed/Light_Transport_I_Surface_Reflection/The_Light_Transport_Equation eq13.4  可以参考13.1.2举的例子, Le + rho_hh( Le + rho_hh( Le +...
             L,beta = vec3(0),vec3(1)
             for _ in range(1):#self.maxdepth):
                 ix = self.HitBy(ray)
-                if ix==NOHIT :
+                if not ix.Valid() :
                     L += beta*self.env_Le
                     break
                 # L += beta* ix.mat.Le
                 # sample = BxDF.Sample(ix)
                 # beta *= sample.value*ti.abs(sample.ray.d.dot(ix.normal))/sample.pdf
                 # ray = sample.ray
-                L = vec3(1)
+                L = ix.bitangent #*0.5+0.5
             self.img[i,j] = L
 
 class Film:
