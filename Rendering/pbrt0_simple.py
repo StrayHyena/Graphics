@@ -4,7 +4,6 @@ import numpy as np
 import trimesh,enum,time
 
 ti.init(arch=ti.cpu,default_fp  =ti.f64,debug=True)
-Array   = ti.types.vector( 200  ,ti.i32)
 vec3    = ti.types.vector(3,ti.f64)
 vec3i   = ti.types.vector(3, ti.i32)
 Medium   = ti.types.struct(eta=vec3,k=vec3)
@@ -47,16 +46,17 @@ class Ray:
         return ret
     @ti.func
     def HitAABB(self,bmin,bmax):
-        t_enter,t_exit,t,isHit = -NOHIT,NOHIT,NOHIT,True
+        t_enter, t_exit, t, isHit, originInsideBox = -NOHIT, NOHIT, NOHIT, True, True
         for i in ti.static(range(3)):
-            if self.d[i]==0:
-                if bmin[i]>self.o[i] or self.o[i]>bmax[i] : isHit = False
+            if self.o[i] < bmin[i] or self.o[i] > bmax[i]: originInsideBox = False
+            if self.d[i] == 0:
+                if bmin[i] > self.o[i] or self.o[i] > bmax[i]: isHit = False
             else:
-                t0,t1 = (bmin[i]-self.o[i])/self.d[i],(bmax[i]-self.o[i])/self.d[i]
-                if self.d[i]<0:t0,t1=t1,t0
-                t_enter,t_exit = max(t_enter,t0),min(t_exit,t1)
-        if t_enter<=t_exit and t_exit>=0: t = t_enter if t_enter>=0 else t_exit
-        return t if isHit else NOHIT
+                t0, t1 = (bmin[i] - self.o[i]) / self.d[i], (bmax[i] - self.o[i]) / self.d[i]
+                if self.d[i] < 0: t0, t1 = t1, t0
+                t_enter, t_exit = max(t_enter, t0), min(t_exit, t1)
+        if t_enter <= t_exit and t_exit >= 0: t = t_enter if t_enter >= 0 else t_exit
+        return -1.0 if originInsideBox else (t if isHit else NOHIT)
 
 Sample   = ti.types.struct(pdf=ti.f64, ray=Ray, value=vec3) # bxdf sample or phase function sample. value is bxdf value or phase function value
 
@@ -74,7 +74,7 @@ class Interaction:
     @ti.func
     def Valid(self):return self.t!=NOHIT
     @ti.func
-    def FetchInfo(self,scene):
+    def Init(self,scene):
         if self.Valid():
             self.pos = self.ray.At(self.t)
             face,area = scene.faces[self.fi],scene.face_areas[self.fi]
@@ -171,6 +171,7 @@ class BxDF:
     def G1(w,ax,ay): return 1.0 / (1.0 + BxDF.Lambda(w, ax,ay) )
     @ti.func
     def D_PDF(w,wm,ax,ay):return BxDF.G1(w,ax,ay)/ti.abs(BxDF.CosTheta(w))*BxDF.D(wm,ax,ay)*ti.abs(w.dot(wm))
+    # wi,wo 都是从hitpos为起点的
     @ti.func
     def Sample(ix:Interaction):
         assert ix.ray.mdm.eta.sum() != 0
@@ -205,6 +206,7 @@ class BxDF:
         return Sample(pdf=pdf,  ray=Ray(o=nextRayO,d=BxDF.ToWorld(wi,N,T).normalized(),mdm=nextRayMdm), value=f)
 
 class Utils:
+    # mdm=MdmNone的意思是 diffuse like的物体一定不会被折射。光线一定不会进入其内部 (有assert检测)
     @staticmethod
     def DiffuseLike(*arg):
         if len(arg)==1:return Material(albedo=vec3(arg[0],arg[0],arg[0]),Le=vec3(0),mdm = MdmNone,type=BxDF.Type.Lambertian)
@@ -258,8 +260,22 @@ class Camera:
         self.unit_x = right * 2. * near_plane * fov / (WIDTH - 1);
         self.unit_y = up * 2. * near_plane * fov / (HEIGHT - 1);
 
-@ti.data_oriented
 class BVH:
+    @ti.dataclass
+    class NodeStack:  # node stack for bvh tree traversal
+        node_idxs: ti.types.vector(200, ti.i32)
+        ts: ti.types.vector(200, ti.f64)  # aabb ray hit time
+        n: ti.i32
+        @ti.func
+        def Push(self, idx, t):
+            self.node_idxs[self.n], self.ts[self.n] = idx, t
+            self.n += 1
+            if self.n >= 200: print('too many nodes in stack')
+        @ti.func
+        def Pop(self):
+            self.n -= 1
+            if self.n < 0: print('node stack is already empty but pop')
+            return self.node_idxs[self.n], self.ts[self.n]
     @ti.dataclass
     class Node:
         min:vec3             # aabb's min for this node
@@ -270,6 +286,7 @@ class BVH:
         end:ti.i32           # end of triangle indices   P.S. triangle range [start,end]
         @ti.func
         def Leaf(self): return self.li==INone and self.ri==INone
+
     # https://developer.nvidia.com/blog/thinking-parallel-part-iii-tree-construction-gpu/
     def __init__(self,aabbs):  # aabbs : (box mins(ndarray),box maxs(ndarray))
         n = len(aabbs[0])
@@ -371,27 +388,33 @@ class Scene:
         self.bvh = BVH(( np.min(vtx[tris] , axis=1), np.max(vtx[tris], axis=1)  ))
         print('bvh build cost ',time.time()-st,' n is ',self.faces.shape[0])
 
+# 光线与AABB的相交，有两种情况：a.光线起点就在AABB内部,此时一定相交，但返回-1.0(某个特殊值,不是NOHIT就行)  b.光线起点在AABB外部，这时返回相交时的time  (see Ray.HitAABB)
+# 函数里的t是光线与某个triangle(不是AABB)的交点t。如果stack里有任何 node_t >= t，此时都可以提前拒绝(即continue)
+# 进一步解释，node_t>=t 说明ray.o在此node之外,任何node之内的元素与ray的交点都比t要大，所以可以提前拒绝
+# 对于else语句，想法是，总是后加入(先pop)先被ray hit的node. (以期待后续的early reject)
+# 当然，如果ray.o本身就在某个node之内，要先Push此node (其实这也是为啥ray.HitAABB的a情况要返回一个负数)
     @ti.func
-    def HitBy(self,ray):
+    def HitBy(self, ray):
         t, triidx = NOHIT, INone
-        s, i = Array([INone for _ in range(Array.n)]), 0  # i: stack's current size
-        s[0] = 0
-        while i>=0:
-            if i >= Array.n: print("Exceed stack's max size  ")
-            node = self.bvh.nodes[s[i]]
-            i -= 1
+        stack = BVH.NodeStack()
+        stack.Push(0, ray.HitAABB(self.bvh.nodes[0].min, self.bvh.nodes[0].max))
+        while stack.n > 0:
+            node_idx, node_t = stack.Pop()
+            if node_t > t: continue
+            node = self.bvh.nodes[node_idx]
             if node.Leaf():
-                assert node.start==node.end
+                assert node.start == node.end
                 tri = self.faces[self.bvh.idx[node.start]]
                 this_t = ray.HitTriangle(self.vertices[tri[0]], self.vertices[tri[1]], self.vertices[tri[2]])
                 if this_t < t: t, triidx = this_t, self.bvh.idx[node.start]
             else:
                 i0, i1 = node.li, node.ri
                 n0, n1 = self.bvh.nodes[i0], self.bvh.nodes[i1]
-                t0, t1 = ray.HitAABB(n0.min,n0.max), ray.HitAABB(n1.min,n1.max)
-                if t0!=NOHIT: s[i+1],i = i0,i+1
-                if t1!=NOHIT: s[i+1],i = i1,i+1
-        return Interaction(t,triidx,ray).FetchInfo(self)
+                t0, t1 = ray.HitAABB(n0.min, n0.max), ray.HitAABB(n1.min, n1.max)
+                if t1 < t0: i0, i1, t0, t1 = i1, i0, t1, t0  # make t0 always < t1
+                if t1 != NOHIT: stack.Push(i1, t1)
+                if t0 != NOHIT: stack.Push(i0, t0)     # first hitted node later push (but first pop)
+        return Interaction(t, triidx, ray).Init(self)
 
     @ti.kernel
     def Draw(self):
