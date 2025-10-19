@@ -289,6 +289,7 @@ class BVH:
 
     # https://developer.nvidia.com/blog/thinking-parallel-part-iii-tree-construction-gpu/
     def __init__(self,aabbs):  # aabbs : (box mins(ndarray),box maxs(ndarray))
+        st = time.time()
         n = len(aabbs[0])
         self.nodes = self.Node.field(shape = n*2)
         self.idx = ti.field(ti.i32,n) # element idx . (triangle index)
@@ -348,6 +349,7 @@ class BVH:
             return lcnt+rcnt+1
         BuildTree(0,0,n-1)
         self.nodes.from_numpy(nodes)
+        print('bvh build cost ',time.time()-st,' n is ',n)
 
 @ti.data_oriented
 class Scene:
@@ -384,9 +386,7 @@ class Scene:
             voffset += len(m.vertices)
             foffset += len(m.faces)
         vtx,tris = self.vertices.to_numpy(),self.faces.to_numpy()
-        st = time.time()
         self.bvh = BVH(( np.min(vtx[tris] , axis=1), np.max(vtx[tris], axis=1)  ))
-        print('bvh build cost ',time.time()-st,' n is ',self.faces.shape[0])
 
 # 光线与AABB的相交，有两种情况：a.光线起点就在AABB内部,此时一定相交，但返回-1.0(某个特殊值,不是NOHIT就行)  b.光线起点在AABB外部，这时返回相交时的time  (see Ray.HitAABB)
 # 函数里的t是光线与某个triangle(不是AABB)的交点t。如果stack里有任何 node_t >= t，此时都可以提前拒绝(即continue)

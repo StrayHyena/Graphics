@@ -3,12 +3,15 @@ import taichi.math as tm
 import numpy as np
 import trimesh,enum,json,time
 
-ti.init(arch=ti.cpu,default_fp  =ti.f64)
+ti.init(arch=ti.cpu,default_fp  =ti.f64,debug=True)
 Array   = ti.types.vector(200,ti.i32)
 vec2,vec3,vec4     = ti.types.vector(2,ti.f64),ti.types.vector(3,ti.f64),ti.types.vector(4,ti.f64)
 vec3i   = ti.types.vector(3, ti.i32)
-Medium   = ti.types.struct(eta=vec3,k=vec3)
-Material = ti.types.struct(albedo=vec3,Le = vec3,mdm=Medium,type=ti.i32,ax=ti.f64,ay=ti.f64)
+Medium   = ti.types.struct(eta=vec3,k=vec3,sa=vec3)  # index of refraction (real part); index of refraction (imaginary part); sigma absorption
+# for hair:  ax -- beta_n(azimuthal roughness) ay--beta_m(longitudinal roughness) alpha-- scale degree
+Material = ti.types.struct(albedo=vec3,Le=vec3,mdm=Medium,type=ti.i32,ax=ti.f64,ay=ti.f64,alpha=ti.f64)
+# 在pbrt里,sigmaa是算出来的，see SigmaAFromConcentration
+hair_def_mat = Material(albedo=vec3(0), Le=vec3(0),mdm=Medium(eta=vec3(1.55), k=vec3(-1), sa=vec3(0.330870897, 0.159241334, 0.0995365530)),type=0, ax=0.3, ay=0.3, alpha=2)
 
 nan,inf = ti.math.nan,ti.math.inf
 WIDTH,HEIGHT = 400,400
@@ -57,7 +60,7 @@ class Ray:
 @ti.dataclass
 class Interaction:
     t:ti.f64    # hit time of ray
-    ci:ti.i32   # curve index
+    oi:ti.i32   # object(curve or triangle) index
     ray:Ray
     u:ti.f64    # surface parameter coordinate u component  [0,1]
     v:ti.f64    # surface parameter coordinate v component  [-1,1]
@@ -73,19 +76,31 @@ class Interaction:
     @ti.func
     def Init(self,scene):
         if self.Valid():
-            self.mat = Material(albedo=vec3(0.3,0.6,0.9),Le=vec3(0),mdm = MdmNone,type=BxDF.Type.Lambertian)
-            self.pos,bezier = self.ray.At(self.t),scene.hair[self.ci]
-            dx = self.ray.d.cross(bezier.p3 - bezier.p0)
-            if dx.norm() < 1e-20: dx, _ = Utils.CoordinateSystem(self.ray.d)
-            w2r = Utils.LookAt(self.ray.o, self.ray.o + self.ray.d,dx)  # world space to ray space. NOTE that curve's space is identical to world space
-            curvepos,tangent,width = bezier.At(self.u), bezier.TangentAt(self.u).normalized(),tm.mix(bezier.w[0],bezier.w[1],self.u)
-            curveposR,tangentR = (w2r@vec4(curvepos,1)).xyz,(w2r@vec4(tangent,0)).xyz
-            # 右手坐标系，tanget是+x ; normal +y; bitangent +z
-            self.v = -(curvepos-self.pos).norm()/width  # 默认在曲线右边，是个负值 (在z轴上)
-            if tangentR.x * -curveposR.y + curveposR.x * tangentR.y > 0: self.v=-self.v # Edge Function: 在tangent左边的话是正值
-            bitangentR = (tm.rot_by_axis(tangentR,-tm.asin(self.v))@vec4(-tangentR.y,tangentR.x,0,0)).xyz
-            self.tangent,self.bitangent = tangent,(w2r.inverse()@vec4(bitangentR,0)).xyz.normalized()
-            self.normal = self.bitangent.cross(self.tangent).normalized()
+            self.pos = self.ray.At(self.t)
+            if self.oi<scene.cn:
+                bezier = scene.hair[self.oi]
+                dx = self.ray.d.cross(bezier.p3 - bezier.p0)
+                if dx.norm() < 1e-20: dx, _ = Utils.CoordinateSystem(self.ray.d)
+                w2r = Utils.LookAt(self.ray.o, self.ray.o + self.ray.d,dx)  # world space to ray space. NOTE that curve's space is identical to world space (i.e. model matrix is Eye3)
+                curvepos,tangent,width = bezier.At(self.u), bezier.TangentAt(self.u).normalized(),tm.mix(bezier.w[0],bezier.w[1],self.u)
+                curveposR,tangentR = (w2r@vec4(curvepos,1)).xyz,(w2r@vec4(tangent,0)).xyz
+                # 右手坐标系，tanget是+x ; normal +y; bitangent +z
+                self.v = (curvepos-self.pos).norm()/width  # 默认在曲线右边，是个正值 (在z轴上)。对应的是从0°顺时针旋转
+                if tangentR.x * -curveposR.y + curveposR.x * tangentR.y > 0: self.v=-self.v # Edge Function: 在tangent左边的话是负值
+                # 注意 bitangent是 tan.y -tan.x (即xAxis顺时针旋转90°). 注意tm.rot_by_axis第二个参数表示顺时针旋转的弧度
+                # Edge Function 判断点P在有向线段AB的哪一侧：
+                # E(P) = (Bx - Ax) * (Py - Ay) - (By - Ay) * (Px - Ax)
+                # E(P) > 0 点P在AB的左侧
+                # 在Ray Space下(可以忽略z坐标)，现在要判断交点在tangent的哪一侧
+                # 此时P = (0, 0) A = curveposR  B = curveposR + tangentR
+                # 所以，E(P) = tangentR.x * -curveposR.y + curveposR.x * tangentR.y
+                bitangentR = (tm.rot_by_axis(tangentR,tm.asin(self.v))@vec4(tangentR.y,-tangentR.x,0,0)).xyz
+                self.tangent,self.bitangent = tangent,(w2r.inverse()@vec4(bitangentR,0)).xyz.normalized()
+                self.normal,self.mat = self.bitangent.cross(self.tangent).normalized(),scene.hair_materials[self.oi]
+            else:
+                self.mat,self.normal = scene.face_materials[self.oi-scene.cn],scene.face_normals[self.oi-scene.cn]
+                self.tangent = vec3(-self.normal.y,self.normal.x,0).normalized() if (self.normal.x!=0 or self.normal.y!=0) else vec3(-self.normal.z,0,self.normal.x).normalized()
+                # print(self.oi,self.normal,self.tangent)
         return self
 
 @ti.dataclass
@@ -162,8 +177,8 @@ class Bezier:
         self.bmax += vec3(self.w.max())
         return self
     @ti.func
-    def HitBy(self,ray)->Interaction:
-        ret = (NOHIT,inf) # t,u
+    def HitBy(self,ray):
+        ret = (NOHIT,inf) # t(of ray),u(parametric coordinate)
         dx = ray.d.cross(self.p3 - self.p0)
         if dx.norm() < 1e-20: dx, _ = Utils.CoordinateSystem(ray.d)
         w2r = Utils.LookAt(ray.o, ray.o + ray.d, dx)  #world space to ray space. NOTE that curve's space is identical to world space
@@ -195,6 +210,8 @@ class BxDF:
         Specular = enum.auto()   # reflection_specular
         Transmission = enum.auto() # reflection_specular  transmission_specular
         Microfacet  = enum.auto()  # reflection_glossy
+        Hair = enum.auto()
+
     Sample = ti.types.struct(pdf=ti.f64,ray=Ray,value=vec3)
     @ti.func
     def CosTheta(w):return w.y
@@ -293,9 +310,10 @@ class BxDF:
             # https://pbr-book.org/4ed/Reflection_Models/Roughness_Using_Microfacet_Theory eq(9.33)
             pdf = BxDF.D_PDF(wo,wm,ax,ay)/4/ti.abs(wo.dot(wm))
             f   = BxDF.D(wm,ax,ay)*BxDF.G(wi,wo,ax,ay)*BxDF.Fresnel(wo, wm, ix.ray.mdm, ix.mdmT) / ti.abs(4 * BxDF.CosTheta(wi) * BxDF.CosTheta(wo))
+        elif ix.mat.type==BxDF.Type.Hair:
+            h,eta,sigma_a,beta_m,beta_n,alpha = ix.v,ix.mat.mdm.eta,ix.mat.mdm.sa,ix.mat.ay,ix.mat.ax,ix.mat.alpha
         nextRayO,nextRayMdm = ix.pos+ix.normal*EPS, Air
-        if next_ix_inside_mesh:nextRayO,nextRayMdm = ix.pos - ix.normal*EPS,   ix.mat.mdm
-        # assert nextRayMdm.eta.norm()>EPS
+        # if next_ix_inside_mesh:nextRayO,nextRayMdm = ix.pos - ix.normal*EPS,   ix.mat.mdm
         return Sample(pdf=pdf,  ray=Ray(o=nextRayO,d=BxDF.ToWorld(wi,N,T).normalized(),mdm=nextRayMdm), value=f)
 
 class Utils:
@@ -331,30 +349,6 @@ class Mesh(trimesh.Trimesh):
         mesh = trimesh.load(objpath,process=False)
         super().__init__(vertices=mesh.vertices,faces=mesh.faces,visual=mesh.visual)
         self.material = material
-        def Perpendicular(n):
-            axis = 0
-            while n[axis] == 0: axis += 1
-            assert n[axis] != 0
-            t = np.zeros(3)
-            t[axis] = n[(axis + 1) % 3]
-            t[(axis + 1) % 3] = - n[axis]
-            return t
-        vt,ft = [],[]
-        for n in self.vertex_normals:vt.append(Perpendicular(n))
-        for n in self.face_normals:ft.append(Perpendicular(n))
-        self.vertex_tangents,self.face_tangents = np.array(vt),np.array(ft)
-        if not hasattr(self.visual,'uv'):return
-        ft = np.zeros_like(self.faces).astype(np.float64)
-        for fi,(vi,vj,vk) in  enumerate(self.faces):
-            uv,n = self.visual.uv,self.face_normals[fi]
-            ft[fi] += (uv[vj][0]-uv[vi][0])*np.cross(n,self.vertices[vi]-self.vertices[vk])
-            ft[fi] += (uv[vk][0]-uv[vi][0])*np.cross(n,self.vertices[vj]-self.vertices[vi])
-            ft[fi] /= np.linalg.norm(ft[fi])
-        self.face_tangents = ft
-        vt = np.zeros_like(self.vertex_tangents)
-        for fi,face in enumerate(self.faces):
-            for vi in face: vt[vi]+=ft[fi]*self.area_faces[fi]
-        for vi in range(self.vertices.shape[0]):self.vertex_tangents[vi] = vt[vi]/np.linalg.norm(vt[vi])
 
 class Camera:
     def __init__(self,pos,target,near_plane=0.01,fov = 0.35):
@@ -380,6 +374,7 @@ class BVH:
         def Leaf(self): return self.li==INone and self.ri==INone
     # https://developer.nvidia.com/blog/thinking-parallel-part-iii-tree-construction-gpu/
     def __init__(self,aabbs):  # aabbs : (box mins(ndarray),box maxs(ndarray))
+        st = time.time()
         n = len(aabbs[0])
         self.nodes = self.Node.field(shape = n*2)
         self.idx = ti.field(ti.i32,n) # element idx . (triangle index)
@@ -439,14 +434,33 @@ class BVH:
             return lcnt+rcnt+1
         BuildTree(0,0,n-1)
         self.nodes.from_numpy(nodes)
+        print('bvh build cost ',time.time()-st,' object number is ',n)
 
 @ti.data_oriented
 class Scene:
-    def __init__(self,hair_json_path,furnace_test=False,camera = Camera(pos=vec3(0,10,-20),target=(0,10,0))):
-        self.furnace,self.maxdepth = furnace_test,1 if not furnace_test else 100
+    def __init__(self,hair_json_path,meshes,furnace_test=False,camera = Camera(pos=vec3(0,11.5,-30),target=(0,11.5,0))):
+        self.furnace,self.maxdepth = furnace_test,6 if not furnace_test else 100
         self.env_Le = vec3(0.5) if furnace_test else vec3(0)
         self.img = ti.Vector.field(3,ti.f64,(WIDTH,HEIGHT))
         self.camera = camera
+        # init triangle meshes
+        self.vn = sum([len(m.vertices) for m in meshes])
+        self.fn = sum([len(m.faces) for m in meshes])
+        self.vertices = ti.Vector.field(3, ti.f64, self.vn)
+        self.faces = ti.Vector.field(3,ti.i32,self.fn)
+        self.face_normals    = ti.Vector.field(3,ti.f64,self.fn) # normal always points to outside
+        self.face_materials = Material.field(shape=self.fn)
+        voffset, foffset = 0, 0
+        for mi, m in enumerate(meshes):
+            if self.furnace: m.material.albedo, m.material.Le = vec3(1), vec3(0)
+            for vi, v in enumerate(m.vertices): self.vertices[voffset + vi] = m.vertices[vi]
+            for fi, f in enumerate(m.faces):
+                self.faces[foffset + fi] = f + voffset
+                self.face_normals[foffset + fi] = m.face_normals[fi]
+                self.face_materials[foffset + fi] = m.material
+            voffset += len(m.vertices)
+            foffset += len(m.faces)
+        # init bezier curves
         hair_data = []
         with open(hair_json_path,'r') as f:
             json_data = json.load(f)
@@ -455,26 +469,35 @@ class Scene:
                 hair_data.extend(curve['points'])
                 hair_data.extend(curve['width'])
         self.hair = Bezier.field(shape = self.cn)
-        self.curve_bmin,self.curve_bmax = ti.Vector.field(3,ti.f64,self.cn),ti.Vector.field(3,ti.f64,self.cn)
-        self.HairInit(np.array(hair_data,dtype=np.float64).reshape(-1,14))  # 3*4+2  (4 control points + width at start and end )
-        st = time.time()
-        self.bvh = BVH((self.curve_bmin.to_numpy(),self.curve_bmax.to_numpy()))
-        print('bvh build cost ',time.time()-st,' n is ',self.cn)
+        # TODO:舍去截断
+        self.cn = 500000
+        self.hair_materials = Material.field(shape=self.cn)
+        self.boxmins,self.boxmaxs = ti.Vector.field(3,ti.f64,self.cn+self.fn),ti.Vector.field(3,ti.f64,self.cn+self.fn)
+        self.Init(np.array(hair_data,dtype=np.float64).reshape(-1,14))  # 3*4+2  (4 control points + width at start and end )
+        self.bvh = BVH((self.boxmins.to_numpy(),self.boxmaxs.to_numpy()))
 
+    # initialize hair and curve/triangle bounding box
     @ti.kernel
-    def HairInit(self,curves:ti.types.ndarray(dtype = ti.types.vector(14,ti.f64),ndim=1)):
-        for i in ti.grouped(curves):
+    def Init(self,curves:ti.types.ndarray(dtype = ti.types.vector(14,ti.f64),ndim=1)):
+        for i in range(self.cn):
             self.hair[i] = Bezier(p0 = vec3(curves[i][0],curves[i][1],curves[i][2]),
                                   p1 = vec3(curves[i][3],curves[i][4],curves[i][5]),
                                   p2 = vec3(curves[i][6],curves[i][7],curves[i][8]),
                                   p3 = vec3(curves[i][9],curves[i][10],curves[i][11]),
                                   w  = vec2(curves[i][12],curves[i][13])).Init()
-            self.curve_bmin[i] = self.hair[i].bmin
-            self.curve_bmax[i] = self.hair[i].bmax
+            self.boxmins[i] = self.hair[i].bmin
+            self.boxmaxs[i] = self.hair[i].bmax
+            self.hair_materials[i] = hair_def_mat
+            self.hair_materials[i].type,self.hair_materials[i].ay,self.hair_materials[i].mdm.sa = BxDF.Type.Hair,0.25,vec3(ti.random(),ti.random(),ti.random())
+        for i in range(self.fn):
+            f = self.faces[i]
+            self.boxmins[i + self.cn] = ti.min(self.vertices[f[0]],self.vertices[f[1]],self.vertices[f[2]])
+            self.boxmaxs[i + self.cn] = ti.max(self.vertices[f[0]], self.vertices[f[1]], self.vertices[f[2]])
 
+# for bvh's idx: [0,self.cn) bezier curve's index; [self.cn,self.cn+self.fn) triangle's index
     @ti.func
     def HitBy(self,ray):
-        t, curve_idx,hit_u = NOHIT, INone,nan
+        t, hit_idx,hit_u = NOHIT, INone,nan
         stack = NodeStack()
         stack.Push(0,ray.HitAABB(self.bvh.nodes[0].min,self.bvh.nodes[0].max))
         while stack.n>0:
@@ -482,9 +505,16 @@ class Scene:
             if node_t >= t: continue
             node = self.bvh.nodes[node_idx]
             if node.Leaf():
-                bezier = self.hair[self.bvh.idx[node.start]]
-                this_t,this_u = bezier.HitBy(ray)
-                if this_t < t: t, curve_idx,hit_u = this_t, self.bvh.idx[node.start],this_u
+                assert node.start==node.end
+                idx = self.bvh.idx[node.start]
+                if idx<self.cn:
+                    bezier = self.hair[idx]
+                    this_t,this_u = bezier.HitBy(ray)
+                    if this_t < t: t, hit_idx,hit_u = this_t, idx,this_u
+                else:
+                    tri = self.faces[idx-self.cn]
+                    this_t = ray.HitTriangle(self.vertices[tri[0]], self.vertices[tri[1]], self.vertices[tri[2]])
+                    if this_t < t: t, hit_idx = this_t, idx
             else:
                 i0, i1 = node.li, node.ri
                 n0, n1 = self.bvh.nodes[i0], self.bvh.nodes[i1]
@@ -492,7 +522,7 @@ class Scene:
                 if t1<t0: i0,i1,t0,t1 = i1,i0,t1,t0
                 if t1!=NOHIT: stack.Push(i1,t1)
                 if t0!=NOHIT: stack.Push(i0,t0)
-        return  Interaction(t,curve_idx,ray,hit_u).Init(self)
+        return  Interaction(t,hit_idx,ray,hit_u).Init(self)
 
     @ti.kernel
     def Draw(self):
@@ -500,16 +530,19 @@ class Scene:
             o = self.camera.origin + (i+ti.random()/2-1)*self.camera.unit_x + (j+ti.random()/2-1)*self.camera.unit_y
             ray = Ray(o=o,d = (o-self.camera.pos).normalized(),mdm=Air)
             L,beta = vec3(0),vec3(1)
-            for _ in range(1):#self.maxdepth):
+            for _ in range(self.maxdepth):
                 ix = self.HitBy(ray)
+                if ix.mat.type==BxDF.Type.Lambertian:L = ix.mat.albedo
+                elif ix.mat.type==BxDF.Type.Hair:L = ix.mat.mdm.sa
+                break
                 if not ix.Valid() :
                     L += beta*self.env_Le
                     break
-                # L += beta* ix.mat.Le
-                # sample = BxDF.Sample(ix)
-                # beta *= sample.value*ti.abs(sample.ray.d.dot(ix.normal))/sample.pdf
-                # ray = sample.ray
-                L = ix.bitangent #*0.5+0.5
+                L += beta* ix.mat.Le
+                sample = BxDF.Sample(ix)
+                beta *= sample.value*ti.abs(sample.ray.d.dot(ix.normal))/sample.pdf
+                ray = sample.ray
+                # L = ix.normal *0.5+0.5
             self.img[i,j] = L
 
 class Film:
@@ -528,4 +561,6 @@ class Film:
             canvas.set_image(self.img.to_numpy().astype(np.float32) / frame)
             window.show()
 
-Film(Scene('./assets/hair/straight-hair.json')).Show()
+Film(Scene('./assets/hair/straight-hair.json',[
+        Mesh('./assets/hair/box.obj',Utils.DiffuseLike(0.9,0.9,0.9)),
+        Mesh('./assets/hair/light.obj',Utils.DiffuseLike(0.9,0.9,0.9,50,50,50))])).Show()
