@@ -283,11 +283,32 @@ class BxDF:
     @ti.func
     def D_PDF(w,wm,ax,ay):return BxDF.G1(w,ax,ay)/ti.abs(BxDF.CosTheta(w))*BxDF.D(wm,ax,ay)*ti.abs(w.dot(wm))
     @ti.func
+    def I0(x):
+        ret, x2i, ifact, i4 = 0.0, 1.0, 1.0, 1.0
+        for i in ti.static(range(10)):
+            if i > 1: ifact *= i
+            ret += x2i / (i4 * ifact ** 2)
+            x2i *= x * x
+            i4 *= 4
+        return ret
+    @ti.func
+    def LogI0(x):
+        ret = ti.log(I0(x))
+        if x > 12: ret = x + 0.5 * (ti.log(1 / x) + 1 / (8 * x) - ti.log(2 * pi))
+        return ret
+    @ti.func
+    def Sinh(x):return 0.5 * (ti.exp(x) - ti.exp(-x))
+    @ti.func
+    def Mp(thetaI, thetaO, v):
+        cosi, sini, coso, sino = ti.cos(thetaI), ti.sin(thetaI), ti.cos(thetaO), ti.sin(thetaO)
+        a, b = cosi * coso / v, sini * sino / v
+        return ti.exp(LogI0(a) - b - 1 / v + 0.6931 + ti.log(1 / (2 * v))) if v < 0.1 else ti.exp(-b) * I0(a) / (Sinh(1 / v) * 2 * v)
+    @ti.func
     def Sample(ix:Interaction):
         assert ix.ray.mdm.eta.sum() != 0
         N,T,n = ix.normal,ix.tangent,vec3(0,1,0)  # N: world normal, T: world tangent, n: local normal
         wo,wi,pdf,f = BxDF.ToLocal(-ix.ray.d,N,T).normalized(),vec3(0),0.,vec3(inf,0,0) # use inf RED to expose problem
-        next_ix_inside_mesh = ix.inside_mesh # next intersection inside mesh : default is same with current
+        # next_ix_inside_mesh = ix.inside_mesh # next intersection inside mesh : default is same with current
         if ix.mat.type==BxDF.Type.Lambertian:
             wi = BxDF.CosineSampleHemisphere()
             pdf = wi.y/tm.pi
@@ -295,21 +316,21 @@ class BxDF:
         elif ix.mat.type==BxDF.Type.Specular:
             wi,pdf = BxDF.Reflect(wo,n),1
             f = vec3(1)/ti.abs(BxDF.CosTheta(wi)) # https://pbr-book.org/4ed/Reflection_Models/Conductor_BRDF  eq(9.9)
-        elif ix.mat.type==BxDF.Type.Transmission:
-            cosI,eta = wo.dot(n), ix.mdmT.eta/ix.ray.mdm.eta
-            if cosI<0:cosI,n = -cosI,-n
-            wi =  (-wo/eta + (cosI/eta - ti.sqrt(1 - (1/eta)**2 * (1 -cosI**2))) * n).normalized()
-            if ti.random()<BxDF.Fresnel(wo,n,ix.ray.mdm,ix.mdmT)[0]: # for Dielectric to Dielectric fresnel's rgb are identical
-                wi = BxDF.Reflect(wo,n)
-            else: next_ix_inside_mesh = not next_ix_inside_mesh # refraction happens: mesh to air or air to mesh
-            pdf,f = 1,vec3(1)/ti.abs(BxDF.CosTheta(wi))
-        elif ix.mat.type==BxDF.Type.Microfacet:
-            ax,ay = ix.mat.ax,ix.mat.ay
-            wm = BxDF.Sample_wm(wo,[ti.random(),ti.random()],ax,ay)
-            wi = BxDF.Reflect(wo, wm)
-            # https://pbr-book.org/4ed/Reflection_Models/Roughness_Using_Microfacet_Theory eq(9.33)
-            pdf = BxDF.D_PDF(wo,wm,ax,ay)/4/ti.abs(wo.dot(wm))
-            f   = BxDF.D(wm,ax,ay)*BxDF.G(wi,wo,ax,ay)*BxDF.Fresnel(wo, wm, ix.ray.mdm, ix.mdmT) / ti.abs(4 * BxDF.CosTheta(wi) * BxDF.CosTheta(wo))
+        # elif ix.mat.type==BxDF.Type.Transmission:
+        #     cosI,eta = wo.dot(n), ix.mdmT.eta/ix.ray.mdm.eta
+        #     if cosI<0:cosI,n = -cosI,-n
+        #     wi =  (-wo/eta + (cosI/eta - ti.sqrt(1 - (1/eta)**2 * (1 -cosI**2))) * n).normalized()
+        #     if ti.random()<BxDF.Fresnel(wo,n,ix.ray.mdm,ix.mdmT)[0]: # for Dielectric to Dielectric fresnel's rgb are identical
+        #         wi = BxDF.Reflect(wo,n)
+        #     else: next_ix_inside_mesh = not next_ix_inside_mesh # refraction happens: mesh to air or air to mesh
+        #     pdf,f = 1,vec3(1)/ti.abs(BxDF.CosTheta(wi))
+        # elif ix.mat.type==BxDF.Type.Microfacet:
+        #     ax,ay = ix.mat.ax,ix.mat.ay
+        #     wm = BxDF.Sample_wm(wo,[ti.random(),ti.random()],ax,ay)
+        #     wi = BxDF.Reflect(wo, wm)
+        #     # https://pbr-book.org/4ed/Reflection_Models/Roughness_Using_Microfacet_Theory eq(9.33)
+        #     pdf = BxDF.D_PDF(wo,wm,ax,ay)/4/ti.abs(wo.dot(wm))
+        #     f   = BxDF.D(wm,ax,ay)*BxDF.G(wi,wo,ax,ay)*BxDF.Fresnel(wo, wm, ix.ray.mdm, ix.mdmT) / ti.abs(4 * BxDF.CosTheta(wi) * BxDF.CosTheta(wo))
         elif ix.mat.type==BxDF.Type.Hair:
             h,eta,sigma_a,beta_m,beta_n,alpha = ix.v,ix.mat.mdm.eta,ix.mat.mdm.sa,ix.mat.ay,ix.mat.ax,ix.mat.alpha
         nextRayO,nextRayMdm = ix.pos+ix.normal*EPS, Air
@@ -488,7 +509,8 @@ class Scene:
             self.boxmins[i] = self.hair[i].bmin
             self.boxmaxs[i] = self.hair[i].bmax
             self.hair_materials[i] = hair_def_mat
-            self.hair_materials[i].type,self.hair_materials[i].ay,self.hair_materials[i].mdm.sa = BxDF.Type.Hair,0.25,vec3(ti.random(),ti.random(),ti.random())
+            self.hair_materials[i].type,self.hair_materials[i].ay = BxDF.Type.Hair,0.25
+            self.hair_materials[i].mdm.sa = vec3(ti.random(),ti.random(),ti.random())
         for i in range(self.fn):
             f = self.faces[i]
             self.boxmins[i + self.cn] = ti.min(self.vertices[f[0]],self.vertices[f[1]],self.vertices[f[2]])
