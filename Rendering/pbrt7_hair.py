@@ -304,6 +304,12 @@ class BxDF:
         a, b = cosi * coso / v, sini * sino / v
         return ti.exp(LogI0(a) - b - 1 / v + 0.6931 + ti.log(1 / (2 * v))) if v < 0.1 else ti.exp(-b) * I0(a) / (Sinh(1 / v) * 2 * v)
     @ti.func
+    def Logisitic(x,s): return ti.exp(-x/s)/(s*(1+ti.exp(-x/s))**2)
+    @ti.func
+    def LogisticCDF(x,s): return 1/(1+ti.exp(-x/s))   
+    @ti.func
+    def TrimmedLogistic(x,s,a,b): return BxDF.Logisitic(x,s)/(BxDF.LogisticCDF(b,s)-BxDF.LogisticCDF(a,s))
+    @ti.func
     def Sample(ix:Interaction):
         assert ix.ray.mdm.eta.sum() != 0
         N,T,n = ix.normal,ix.tangent,vec3(0,1,0)  # N: world normal, T: world tangent, n: local normal
