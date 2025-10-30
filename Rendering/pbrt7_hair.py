@@ -338,7 +338,13 @@ class BxDF:
         #     pdf = BxDF.D_PDF(wo,wm,ax,ay)/4/ti.abs(wo.dot(wm))
         #     f   = BxDF.D(wm,ax,ay)*BxDF.G(wi,wo,ax,ay)*BxDF.Fresnel(wo, wm, ix.ray.mdm, ix.mdmT) / ti.abs(4 * BxDF.CosTheta(wi) * BxDF.CosTheta(wo))
         elif ix.mat.type==BxDF.Type.Hair:
-            h,eta,sigma_a,beta_m,beta_n,alpha = ix.v,ix.mat.mdm.eta,ix.mat.mdm.sa,ix.mat.ay,ix.mat.ax,ix.mat.alpha
+            pmax,h,eta,sigma_a,beta_m,beta_n,alpha = 3,ix.v,ix.mat.mdm.eta,ix.mat.mdm.sa,ix.mat.ay,ix.mat.ax,ix.mat.alpha
+            #注意，这里的Θ φ并不是之前的球坐标的Θ φ，而且在ti.atan2返回的是 -Π,Π
+            theta_o,phi_o,gamma_o = tm.pi/2-ti.acos(wo.x),ti.atan2(wo.y,wo.z),ti.asin(h)
+            if phi_o<0:phi_o+=2*tm.pi
+            #  sample wi
+
+
         nextRayO,nextRayMdm = ix.pos+ix.normal*EPS, Air
         # if next_ix_inside_mesh:nextRayO,nextRayMdm = ix.pos - ix.normal*EPS,   ix.mat.mdm
         return Sample(pdf=pdf,  ray=Ray(o=nextRayO,d=BxDF.ToWorld(wi,N,T).normalized(),mdm=nextRayMdm), value=f)

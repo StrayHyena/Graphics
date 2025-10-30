@@ -215,11 +215,14 @@ class Volume:
             if l[i]<360 or l[i]>830:ret[i] = 0
         return ret
 
+# 根据人眼的明视觉曲线采样可见光波长，名视觉曲线是指人眼对不同波长的光的感受的强度分布曲线
     @ti.func
     def SampleVisibleWavelengths() :
         x = 0.85691062 - 1.82750197 * vec3(ti.random(),ti.random(),ti.random())
         return 538 - 138.888889 * 0.5*tm.log((1+x)/(1-x))
 
+#https://pbr-book.org/4ed/Radiometry,_Spectra,_and_Color/Light_Emission eq(4.17) 
+# 输入一个波长，和温度，返回 此波长在此温度下的Radiance
     @ti.func
     def Blackbody(wavelen:vec3,T:ti.f64):
         Le = vec3(0)
@@ -239,18 +242,24 @@ class Volume:
     @ti.func
     def SamplePoint(self,pos):
         Le,d,T = vec3(0),self.rho.At(pos),self.T.At(pos)*self.TScale
-        # black body emitter
+# https://phet.colorado.edu/sims/html/blackbody-spectrum/latest/blackbody-spectrum_all.html
+# 一个理想的、处于热平衡状态的黑体会辐射出所有波长的电磁波。 但是它们的强度有区别
+# 公式 lambdaMax = b / T 是 维恩位移定律（Wien's displacement law）  是黑体辐射曲线的峰值波长，也就是辐射最强的波长。 注意：【最强】  
+# normalizationFactor 是消除了温度对于radiance强度的影响。 解耦亮度与色温的关系。
+#  想象你有三个灯泡： 100W 白炽灯（偏黄色）   500W 摄影灯（白光）  1000W 高温灯（偏蓝色）  归一化相当于把三个灯泡调到相同的主观亮度水平，这样观众就能专注于它们的颜色差异而非亮度差异。
         lambdaMax = 2.8977721e-3 / T
-        normalizationFactor = 1 / Volume.Blackbody(vec3(lambdaMax) * 1e9, T)
+        normalizationFactor = 1 / Volume.Blackbody(vec3(lambdaMax) * 1e9, T)  
         lambdas = Volume.SampleVisibleWavelengths()
         Le = Volume.Blackbody(lambdas, T) * normalizationFactor
         # convert SampledSpetrum的功率谱到RGB的功率谱
         lambdas_pdf = Volume.VisibleWavelengthsPDF(lambdas)
-        LeRGB, Le = vec3(0), Le / lambdas_pdf
+        LeXYZ, Le = vec3(0), Le / lambdas_pdf
         for i in ti.static(range(3)):
             for j in ti.static(range(3)):
-                LeRGB[i] += CIE[i, int(lambdas[j]) - 360] * Le[j] / 3
-        LeRGB = ti.Matrix([[3.2406, -1.5372, -0.4986], [-0.9689, 1.8758, 0.0415], [0.0557, -0.2040, 1.057]]) @ LeRGB
+# https://www.pbr-book.org/4ed/Radiometry,_Spectra,_and_Color/Color  eq(4.22) 
+# 结合之前的Le / lambdas_pdf，这实际上是对 eq(4.22)的蒙特卡洛积分。采样了3个波长
+                LeXYZ[i] += CIE[i, int(lambdas[j]) - 360] * Le[j] / 3
+        LeRGB = ti.Matrix([[3.2406, -1.5372, -0.4986], [-0.9689, 1.8758, 0.0415], [0.0557, -0.2040, 1.057]]) @ LeXYZ
         return MediumPointProperties(sa=d*self.saScale,ss=d*self.ssScale,g=self.g,Le=LeRGB*self.LeScale)
 
     @ti.kernel
@@ -278,7 +287,7 @@ class Volume:
             self.img[i,j] = L
 
 @ti.data_oriented
-class Film:
+class Film:#
     def __init__(self,scene):
         self.img = ti.Vector.field(3,ti.f64,(WIDTH,HEIGHT))
         self.scene = scene
