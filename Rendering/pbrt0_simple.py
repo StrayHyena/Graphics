@@ -157,6 +157,13 @@ class BxDF:
         t3,t4 = cos_theta2*A2plusB2+sin_theta2**2,t2*sin_theta2
         Rp = Rs*(t3-t4)/(t3+t4)
         return 0.5 * (Rs+Rp)
+    # 注意,这里的eta是折射medium的折射率(可能是复数)比上入射medium的折射率
+    @ti.func
+    def Fresnel(cos_i,eta):
+        sin_i = ti.sqrt( 1-cos_i**2 )
+        sin_t = sin_i/eta
+
+
     @ti.func  # https://pbr-book.org/4ed/Reflection_Models/Roughness_Using_Microfacet_Theory eq(9.16)
     def D(w,ax,ay):
         ct2,cp2,sp2 = BxDF.CosTheta2(w),BxDF.CosPhi2(w),BxDF.SinPhi2(w)

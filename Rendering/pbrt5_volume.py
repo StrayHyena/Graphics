@@ -6,6 +6,7 @@ import enum,json
 ti.init(arch=ti.gpu,default_fp  =ti.f64,debug=True)
 Array   = ti.types.vector( 200  ,ti.i32)
 vec3    = ti.types.vector(3,ti.f64)
+vec4    = ti.types.vector(4,ti.f64)
 vec3i   = ti.types.vector(3, ti.i32)
 MediumPointProperties = ti.types.struct(sa=ti.f64,ss=ti.f64,g=ti.f64,Le=vec3)
 WIDTH,HEIGHT = 400,400
@@ -209,27 +210,27 @@ class Volume:
         self.envLe = vec3(135/255, 206/255, 235/255)
 
     @ti.func
-    def VisibleWavelengthsPDF(l:vec3):
+    def VisibleWavelengthsPDF(l:vec4):
         ret =  0.0039398042 * (1-tm.tanh(0.0072 * (l - 538))**2)
-        for i in ti.static(range(3)):
+        for i in ti.static(range(l.n)):
             if l[i]<360 or l[i]>830:ret[i] = 0
         return ret
 
 # 根据人眼的明视觉曲线采样可见光波长，名视觉曲线是指人眼对不同波长的光的感受的强度分布曲线
     @ti.func
     def SampleVisibleWavelengths() :
-        x = 0.85691062 - 1.82750197 * vec3(ti.random(),ti.random(),ti.random())
+        x = 0.85691062 - 1.82750197 * vec4(ti.random(),ti.random(),ti.random(),ti.random())
         return 538 - 138.888889 * 0.5*tm.log((1+x)/(1-x))
 
 #https://pbr-book.org/4ed/Radiometry,_Spectra,_and_Color/Light_Emission eq(4.17) 
 # 输入一个波长，和温度，返回 此波长在此温度下的Radiance
     @ti.func
-    def Blackbody(wavelen:vec3,T:ti.f64):
-        Le = vec3(0)
+    def Blackbody(wavelen:vec4,T:ti.f64):
+        Le = vec4(0)
         if T>0:
             c,h,kb,l = 299792458.,6.62606957e-34,1.3806488e-23,wavelen * 1e-9
             Le = (2 * h * c * c) / (l**5 * (ti.exp((h * c) / (l * kb * T)) - 1))
-        return Le;
+        return Le
 
     @ti.func
     def SampleSaSsSn(self,sa,ss):
@@ -239,26 +240,25 @@ class Volume:
         elif r<ss+sa: ret = 1 # sample Sigma_s
         return ret
 
-    @ti.func
-    def SamplePoint(self,pos):
-        Le,d,T = vec3(0),self.rho.At(pos),self.T.At(pos)*self.TScale
 # https://phet.colorado.edu/sims/html/blackbody-spectrum/latest/blackbody-spectrum_all.html
 # 一个理想的、处于热平衡状态的黑体会辐射出所有波长的电磁波。 但是它们的强度有区别
 # 公式 lambdaMax = b / T 是 维恩位移定律（Wien's displacement law）  是黑体辐射曲线的峰值波长，也就是辐射最强的波长。 注意：【最强】  
 # normalizationFactor 是消除了温度对于radiance强度的影响。 解耦亮度与色温的关系。
 #  想象你有三个灯泡： 100W 白炽灯（偏黄色）   500W 摄影灯（白光）  1000W 高温灯（偏蓝色）  归一化相当于把三个灯泡调到相同的主观亮度水平，这样观众就能专注于它们的颜色差异而非亮度差异。
+    @ti.func
+    def SamplePoint(self, pos):
+        d, T = self.rho.At(pos), self.T.At(pos) * self.TScale
         lambdaMax = 2.8977721e-3 / T
-        normalizationFactor = 1 / Volume.Blackbody(vec3(lambdaMax) * 1e9, T)  
+        normalizationFactor = 1 / Volume.Blackbody(vec4(lambdaMax) * 1e9, T)
         lambdas = Volume.SampleVisibleWavelengths()
         Le = Volume.Blackbody(lambdas, T) * normalizationFactor
-        # convert SampledSpetrum的功率谱到RGB的功率谱
         lambdas_pdf = Volume.VisibleWavelengthsPDF(lambdas)
         LeXYZ, Le = vec3(0), Le / lambdas_pdf
         for i in ti.static(range(3)):
-            for j in ti.static(range(3)):
-# https://www.pbr-book.org/4ed/Radiometry,_Spectra,_and_Color/Color  eq(4.22) 
-# 结合之前的Le / lambdas_pdf，这实际上是对 eq(4.22)的蒙特卡洛积分。采样了3个波长
-                LeXYZ[i] += CIE[i, int(lambdas[j]) - 360] * Le[j] / 3
+            for j in ti.static(range(lambdas.n)):
+                # https://www.pbr-book.org/4ed/Radiometry,_Spectra,_and_Color/Color  eq(4.22)
+                # 结合之前的Le / lambdas_pdf，这实际上是对 eq(4.22)的蒙特卡洛积分。采样了4个波长
+                LeXYZ[i] += CIE[i, int(lambdas[j]) - 360] * Le[j] / lambdas.n
         LeRGB = ti.Matrix([[3.2406, -1.5372, -0.4986], [-0.9689, 1.8758, 0.0415], [0.0557, -0.2040, 1.057]]) @ LeXYZ
         return MediumPointProperties(sa=d*self.saScale,ss=d*self.ssScale,g=self.g,Le=LeRGB*self.LeScale)
 
