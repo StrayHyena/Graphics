@@ -83,18 +83,18 @@ class Interaction:
                 if dx.norm() < 1e-20: dx, _ = Utils.CoordinateSystem(self.ray.d)
                 w2r = Utils.LookAt(self.ray.o, self.ray.o + self.ray.d,dx)  # world space to ray space. NOTE that curve's space is identical to world space (i.e. model matrix is Eye3)
                 curvepos,tangent,width = bezier.At(self.u), bezier.TangentAt(self.u).normalized(),tm.mix(bezier.w[0],bezier.w[1],self.u)
-                curveposR,tangentR = (w2r@vec4(curvepos,1)).xyz,(w2r@vec4(tangent,0)).xyz
+                curveposR,tangentR = (w2r@vec4(curvepos,1)).xyz,(w2r@vec4(tangent,0)).xyz  # suffix R means Ray Space
                 # 右手坐标系，tanget是+x ; normal +y; bitangent +z
                 self.v = (curvepos-self.pos).norm()/width  # 默认在曲线右边，是个正值 (在z轴上)。对应的是从0°顺时针旋转
-                if tangentR.x * -curveposR.y + curveposR.x * tangentR.y > 0: self.v=-self.v # Edge Function: 在tangent左边的话是负值
-                # 注意 bitangent是 tan.y -tan.x (即xAxis顺时针旋转90°). 注意tm.rot_by_axis第二个参数表示顺时针旋转的弧度
                 # Edge Function 判断点P在有向线段AB的哪一侧：
                 # E(P) = (Bx - Ax) * (Py - Ay) - (By - Ay) * (Px - Ax)
                 # E(P) > 0 点P在AB的左侧
                 # 在Ray Space下(可以忽略z坐标)，现在要判断交点在tangent的哪一侧
                 # 此时P = (0, 0) A = curveposR  B = curveposR + tangentR
                 # 所以，E(P) = tangentR.x * -curveposR.y + curveposR.x * tangentR.y
-                bitangentR = (tm.rot_by_axis(tangentR,tm.asin(self.v))@vec4(tangentR.y,-tangentR.x,0,0)).xyz
+                if tangentR.x * -curveposR.y + curveposR.x * tangentR.y > 0: self.v=-self.v # Edge Function: 在tangent左边的话是负值
+                # ① bitangent是 -tan.y tan.x (即逆时针旋转90°,注意在RaySpace下看向+z(即光线方向)时，y指向上，x指向左). ②注意tm.rot_by_axis第二个参数表示顺时针旋转的弧度
+                bitangentR = (tm.rot_by_axis(tangentR,tm.asin(self.v))@vec4(-tangentR.y,tangentR.x,0,0)).xyz
                 self.tangent,self.bitangent = tangent,(w2r.inverse()@vec4(bitangentR,0)).xyz.normalized()
                 self.normal,self.mat = self.bitangent.cross(self.tangent).normalized(),scene.hair_materials[self.oi]
             else:
@@ -561,7 +561,7 @@ class Scene:
             for _ in range(self.maxdepth):
                 ix = self.HitBy(ray)
                 if ix.mat.type==BxDF.Type.Lambertian:L = ix.mat.albedo
-                elif ix.mat.type==BxDF.Type.Hair:L = ix.mat.mdm.sa
+                elif ix.mat.type==BxDF.Type.Hair:L = (ix.bitangent)
                 break
                 if not ix.Valid() :
                     L += beta*self.env_Le
