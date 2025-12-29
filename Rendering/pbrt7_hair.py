@@ -339,6 +339,8 @@ class BxDF:
         #     f   = BxDF.D(wm,ax,ay)*BxDF.G(wi,wo,ax,ay)*BxDF.Fresnel(wo, wm, ix.ray.mdm, ix.mdmT) / ti.abs(4 * BxDF.CosTheta(wi) * BxDF.CosTheta(wo))
         elif ix.mat.type==BxDF.Type.Hair:
             h,eta,sigma_a,beta_m,beta_n,alpha = ix.v,ix.mat.mdm.eta,ix.mat.mdm.sa,ix.mat.ay,ix.mat.ax,ix.mat.alpha
+            gamma_o,theta_o,phi_o = ti.asin(h),ti.asin(wo.x),ti.atan2(wo.y,wo.z)
+            assert( ti.abs(phi_o-gamma_o - tm.pi/2)<1e-6 )
         nextRayO,nextRayMdm = ix.pos+ix.normal*EPS, Air
         # if next_ix_inside_mesh:nextRayO,nextRayMdm = ix.pos - ix.normal*EPS,   ix.mat.mdm
         return Sample(pdf=pdf,  ray=Ray(o=nextRayO,d=BxDF.ToWorld(wi,N,T).normalized(),mdm=nextRayMdm), value=f)
@@ -560,16 +562,16 @@ class Scene:
             L,beta = vec3(0),vec3(1)
             for _ in range(self.maxdepth):
                 ix = self.HitBy(ray)
+                L += beta* ix.mat.Le
+                sample = BxDF.Sample(ix)
+                beta *= sample.value*ti.abs(sample.ray.d.dot(ix.normal))/sample.pdf
+                ray = sample.ray
                 if ix.mat.type==BxDF.Type.Lambertian:L = ix.mat.albedo
                 elif ix.mat.type==BxDF.Type.Hair:L = (ix.bitangent)
                 break
                 if not ix.Valid() :
                     L += beta*self.env_Le
                     break
-                L += beta* ix.mat.Le
-                sample = BxDF.Sample(ix)
-                beta *= sample.value*ti.abs(sample.ray.d.dot(ix.normal))/sample.pdf
-                ray = sample.ray
                 # L = ix.normal *0.5+0.5
             self.img[i,j] = L
 
