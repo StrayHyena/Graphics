@@ -50,8 +50,10 @@ class N:
     def __init__(self):
         n = 512
         self.i = ti.field(ti.f64, n)
+        self.h = ti.field(ti.f64, n)
         self.o = ti.field(ti.f64, n)
         self.i.from_numpy(np.linspace(-pi,pi,n).astype(np.float64))
+        self.h.from_numpy(np.linspace(-1, 1, n).astype(np.float64))
     @ti.func
     def Logisitic(x,s): return ti.exp(-x/s)/(s*(1+ti.exp(-x/s))**2)
     @ti.func
@@ -67,7 +69,20 @@ class N:
             self.TrimmedLogistics(s)
             plt.plot(self.i.to_numpy(), self.o.to_numpy())
         plt.show()
-N().Plot()
+    @ti.func
+    def Phi(self,p,h):
+        gamma_o = ti.asin(h)
+        gamma_t = ti.asin(ti.sin(gamma_o)/eta)
+        return 2*np.pi*gamma_t-2*gamma_o+p*np.pi
+    @ti.kernel
+    def Phis(self):
+        for i in self.h:self.o[i] = self.Phi(1,self.h[i])
+    # Figure 9.52
+    def PlotPhis(self):
+        self.Phis()
+        plt.plot(self.h.to_numpy(), self.o.to_numpy())
+        plt.show()
+N().PlotPhis()
 
 #这个类来验证使用eta'计算的折射角和实际折射角投影到法平面是一致的
 class ModifiedIORChecker:
