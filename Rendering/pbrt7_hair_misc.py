@@ -47,8 +47,9 @@ class M:
 
 @ti.data_oriented
 class N:
-    def __init__(self):
-        n = 512
+    def __init__(self,beta_n = 0.1):
+        n,self.beta_n = 512,beta_n
+        self.s = 0.626657069 * (0.265 * beta_n + 1.194 * beta_n**2 +5.372 * beta_n**22)
         self.i = ti.field(ti.f64, n)
         self.h = ti.field(ti.f64, n)
         self.o = ti.field(ti.f64, n)
@@ -58,6 +59,8 @@ class N:
     def Logisitic(x,s): return ti.exp(-x/s)/(s*(1+ti.exp(-x/s))**2)
     @ti.func
     def LogisticCDF(x,s): return 1/(1+ti.exp(-x/s))
+    # 类似于微表面的ggx(微观法向与half vector之间的夹角越小值越大);这个函数应该在零附近很大
+    # 对于头发的bxdf,我们要衡量两个(法平面内的)方向之间的差值。①是采样的入射光线wi ②根据wo计算(即Phi()函数)出的完全镜面反射/折射的入射光线
     @ti.func
     def TrimmedLogistic(x,s,a,b): return N.Logisitic(x,s)/(N.LogisticCDF(b,s)-N.LogisticCDF(a,s))
     @ti.kernel
@@ -73,7 +76,7 @@ class N:
     def Phi(self,p,h):
         gamma_o = ti.asin(h)
         gamma_t = ti.asin(ti.sin(gamma_o)/eta)
-        return 2*np.pi*gamma_t-2*gamma_o+p*np.pi
+        return 2*p*gamma_t-2*gamma_o+p*np.pi
     @ti.kernel
     def Phis(self):
         for i in self.h:self.o[i] = self.Phi(1,self.h[i])
@@ -82,6 +85,11 @@ class N:
         self.Phis()
         plt.plot(self.h.to_numpy(), self.o.to_numpy())
         plt.show()
+    # 这么想,Phi()虽然以γo为视角计算了其偏转,但是γo和φo其实指代的是同一个法平面的方向wo (γo和φo是wo在不同的坐标系下的表达)
+    # 所以 完全镜面反射/折射之后的出射角φi是 φo+Phi()  , 采样的出射角是φ'。所以，TrimmedLogistic衡量的应该是 φ'-(φo+Phi())
+    @ti.func
+    def N(self,phi_o,phi_i,p):
+        gamma_o = ti.asin(phi_o)
 N().PlotPhis()
 
 #这个类来验证使用eta'计算的折射角和实际折射角投影到法平面是一致的
@@ -118,4 +126,4 @@ class ModifiedIORChecker:
             phi,theta = np.random.rand()*np.pi,(np.random.rand()-0.5)*np.pi
             ModifiedIORChecker.Verify(phi,theta)
 
-ModifiedIORChecker.RunRandomTests(10)
+# ModifiedIORChecker.RunRandomTests(10)
