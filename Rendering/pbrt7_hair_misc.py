@@ -1,5 +1,7 @@
 import numpy as np
 from matplotlib import pyplot as plt
+import matplotlib
+matplotlib.use('TkAgg')
 import taichi as ti
 import taichi.math as tm
 from math import pi
@@ -48,13 +50,16 @@ class M:
 @ti.data_oriented
 class N:
     def __init__(self,beta_n = 0.1):
-        n,self.beta_n = 512,beta_n
+        self.n,self.beta_n = 512,beta_n
         self.s = 0.626657069 * (0.265 * beta_n + 1.194 * beta_n**2 +5.372 * beta_n**22)
-        self.i = ti.field(ti.f64, n)
-        self.h = ti.field(ti.f64, n)
-        self.o = ti.field(ti.f64, n)
-        self.i.from_numpy(np.linspace(-pi,pi,n).astype(np.float64))
-        self.h.from_numpy(np.linspace(-1, 1, n).astype(np.float64))
+        self.i = ti.field(ti.f64, self.n)
+        self.h = ti.field(ti.f64, self.n)
+        self.o = ti.field(ti.f64, self.n)
+        self.i.from_numpy(np.linspace(-pi,pi,self.n).astype(np.float64))
+        self.h.from_numpy(np.linspace(-1, 1, self.n).astype(np.float64))
+        self.plt,self.ax =  plt.subplots(1)
+        self.ax.spines['bottom'].set_position('zero')  # 将底部坐标轴移到y=0的位置
+        self.ax.spines['left'].set_position('zero')
     @ti.func
     def Logisitic(x,s): return ti.exp(-x/s)/(s*(1+ti.exp(-x/s))**2)
     @ti.func
@@ -70,27 +75,52 @@ class N:
     def PlotTrimmedLogistic(self):
         for s in [0.1,0.5]:
             self.TrimmedLogistics(s)
-            plt.plot(self.i.to_numpy(), self.o.to_numpy())
+            self.ax.plot(self.i.to_numpy(), self.o.to_numpy())
         plt.show()
     @ti.func
-    def Phi(self,p,h):
+    def Phi(p,h):
+        eta = 5
         gamma_o = ti.asin(h)
         gamma_t = ti.asin(ti.sin(gamma_o)/eta)
-        return 2*p*gamma_t-2*gamma_o+p*np.pi
+        return 2*p*gamma_t-2*gamma_o+p*pi
     @ti.kernel
     def Phis(self):
-        for i in self.h:self.o[i] = self.Phi(1,self.h[i])
+        for i in self.h:self.o[i] = N.Phi(1,self.h[i])
     # Figure 9.52
     def PlotPhis(self):
         self.Phis()
-        plt.plot(self.h.to_numpy(), self.o.to_numpy())
+        self.ax.plot(self.h.to_numpy(), self.o.to_numpy())
+        self.ax.set_yticks(np.arange(0, 3, 0.5) * np.pi)
+        self.ax.set_yticklabels([f'{frac}π' for frac in np.arange(0, 3, 0.5)])
         plt.show()
     # 这么想,Phi()虽然以γo为视角计算了其偏转,但是γo和φo其实指代的是同一个法平面的方向wo (γo和φo是wo在不同的坐标系下的表达)
     # 所以 完全镜面反射/折射之后的出射角φi是 φo+Phi()  , 采样的出射角是φ'。所以，TrimmedLogistic衡量的应该是 φ'-(φo+Phi())
     @ti.func
-    def N(self,phi_o,phi_i,p):
-        gamma_o = ti.asin(phi_o)
-N().PlotPhis()
+    def N(p,h,s,phi):
+        dphi = phi-N.Phi(p,h)
+        while dphi>pi:dphi -= 2*pi
+        while dphi<-pi:dphi += 2*pi
+        return N.TrimmedLogistic(dphi,s,-pi,pi)
+    @ti.kernel
+    def Ns(self,p:ti.f64,h:ti.f64):
+        for i in self.i: self.i[i] = i/(self.n-1)*2*pi
+        for i in self.o: self.o[i] = N.N(p, h, self.s,self.i[i])
+    # Figure 9.54
+    def PlotPolarNs(self):
+        for h in [-0.5,0.3]:
+            self.Ns(1,h)
+            pts = []
+            for i in range(self.n): pts.append(self.o[i]*np.array([np.cos(self.i[i]),np.sin(self.i[i])]))
+            pts = np.array(pts)
+            self.ax.plot(pts[:,0],pts[:,1],label=f'{h}')
+        self.ax.set_xlim(-10, 10)
+        self.ax.set_ylim(-10, 10)
+        self.ax.legend()
+        plt.show()
+
+# N().PlotPhis()
+# N().PlotTrimmedLogistic()
+N().PlotPolarNs()
 
 #这个类来验证使用eta'计算的折射角和实际折射角投影到法平面是一致的
 class ModifiedIORChecker:
