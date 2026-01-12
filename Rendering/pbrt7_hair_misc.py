@@ -64,7 +64,7 @@ class N:
     def Logisitic(x,s): return ti.exp(-x/s)/(s*(1+ti.exp(-x/s))**2)
     @ti.func
     def LogisticCDF(x,s): return 1/(1+ti.exp(-x/s))
-    # 类似于微表面的ggx(微观法向与half vector之间的夹角越小值越大);这个函数应该在零附近很大
+    # 类似于微表面的NDF(微观法向与half vector之间的夹角越小值越大);这个函数应该在零附近很大
     # 对于头发的bxdf,我们要衡量两个(法平面内的)方向之间的差值。①是采样的入射光线wi ②根据wo计算(即Phi()函数)出的完全镜面反射/折射的入射光线
     @ti.func
     def TrimmedLogistic(x,s,a,b): return N.Logisitic(x,s)/(N.LogisticCDF(b,s)-N.LogisticCDF(a,s))
@@ -120,7 +120,7 @@ class N:
 
 # N().PlotPhis()
 # N().PlotTrimmedLogistic()
-N().PlotPolarNs()
+# N().PlotPolarNs()
 
 #这个类来验证使用eta'计算的折射角和实际折射角投影到法平面是一致的
 class ModifiedIORChecker:
@@ -147,6 +147,10 @@ class ModifiedIORChecker:
         gamma_t_B = np.arcsin(sin_gamma_t)
         # if np.abs(gamma_t_A - gamma_t_B)>1e-6:
         print(f"φ {np.rad2deg(phi):<7.2f} θ {np.rad2deg(theta):<7.2f} γ {np.rad2deg(gamma_o):<7.2f} {np.rad2deg(gamma_t_A):<7.2f} {np.rad2deg(gamma_t_B):<7.2f} {gamma_t_A-gamma_t_B:<7.2f}")
+    # 我们还可以看一下θt
+        theta_t_A = np.arcsin(wt[0])
+        theta_t_B = w[0]/eta
+        print(f"θtA {np.rad2deg(theta_t_A):<7.2f} θtB {np.rad2deg(theta_t_B):<7.2f}")
 
     @staticmethod
     def RunRandomTests(num_tests=10):
@@ -156,4 +160,4 @@ class ModifiedIORChecker:
             phi,theta = np.random.rand()*np.pi,(np.random.rand()-0.5)*np.pi
             ModifiedIORChecker.Verify(phi,theta)
 
-# ModifiedIORChecker.RunRandomTests(10)
+ModifiedIORChecker.RunRandomTests(10)
