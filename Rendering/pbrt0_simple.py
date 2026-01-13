@@ -58,7 +58,7 @@ class Ray:
         if t_enter <= t_exit and t_exit >= 0: t = t_enter if t_enter >= 0 else t_exit
         return -1.0 if originInsideBox else (t if isHit else NOHIT)
 
-Sample   = ti.types.struct(pdf=ti.f64, ray=Ray, value=vec3) # bxdf sample or phase function sample. value is bxdf value or phase function value
+Sample = ti.types.struct(pdf=ti.f64, ray=Ray, value=vec3) # bxdf sample or phase function sample. value is bxdf value or phase function value
 
 @ti.dataclass
 class Interaction:
@@ -101,7 +101,6 @@ class BxDF:
         Specular = enum.auto()   # reflection_specular
         Transmission = enum.auto() # reflection_specular  transmission_specular
         Microfacet  = enum.auto()  # reflection_glossy
-    Sample = ti.types.struct(pdf=ti.f64,ray=Ray,value=vec3)
     @ti.func
     def CosTheta(w):return w.y
     @ti.func
@@ -157,13 +156,6 @@ class BxDF:
         t3,t4 = cos_theta2*A2plusB2+sin_theta2**2,t2*sin_theta2
         Rp = Rs*(t3-t4)/(t3+t4)
         return 0.5 * (Rs+Rp)
-    # 注意,这里的eta是折射medium的折射率(可能是复数)比上入射medium的折射率
-    @ti.func
-    def Fresnel(cos_i,eta):
-        sin_i = ti.sqrt( 1-cos_i**2 )
-        sin_t = sin_i/eta
-
-
     @ti.func  # https://pbr-book.org/4ed/Reflection_Models/Roughness_Using_Microfacet_Theory eq(9.16)
     def D(w,ax,ay):
         ct2,cp2,sp2 = BxDF.CosTheta2(w),BxDF.CosPhi2(w),BxDF.SinPhi2(w)

@@ -41,7 +41,7 @@ class Ray:
         if t_enter<=t_exit and t_exit>=0: t = t_enter if t_enter>=0 else t_exit
         return t if isHit else NOHIT
 
-Sample  = ti.types.struct(pdf=ti.f64, ray=Ray, value=vec3) # bxdf sample or phase function sample. value is bxdf value or phase function value
+Sample = ti.types.struct(pdf=ti.f64, ray=Ray, value=vec3) # bxdf sample or phase function sample. value is bxdf value or phase function value
 
 @ti.dataclass
 class Interaction:

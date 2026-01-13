@@ -2,20 +2,17 @@ import taichi as ti
 import taichi.math as tm
 import numpy as np
 import trimesh,enum,json,time
-from math import pi
 
 ti.init(arch=ti.cpu,default_fp  =ti.f64,debug=True)
 Array   = ti.types.vector(200,ti.i32)
 vec2,vec3,vec4     = ti.types.vector(2,ti.f64),ti.types.vector(3,ti.f64),ti.types.vector(4,ti.f64)
 vec3i   = ti.types.vector(3, ti.i32)
 Medium   = ti.types.struct(eta=vec3,k=vec3,sa=vec3)  # index of refraction (real part); index of refraction (imaginary part); sigma absorption
-# for hair:  ax -- beta_n(azimuthal roughness) ay--beta_m(longitudinal roughness) alpha-- scale degree
-Material = ti.types.struct(albedo=vec3,Le=vec3,mdm=Medium,type=ti.i32,ax=ti.f64,ay=ti.f64,alpha=ti.f64)
+Material = ti.types.struct(albedo=vec3,Le=vec3,mdm=Medium,type=ti.i32,ax=ti.f64,ay=ti.f64)
 # 在pbrt里,sigmaa是算出来的，see SigmaAFromConcentration
-hair_def_mat = Material(albedo=vec3(0), Le=vec3(0),mdm=Medium(eta=vec3(1.55), k=vec3(-1), sa=vec3(0.330870897, 0.159241334, 0.0995365530)),type=0, ax=0.3, ay=0.3, alpha=2)
 PMAX = 3
 
-nan,inf = ti.math.nan,ti.math.inf
+nan,inf,pi = tm.nan,tm.inf,tm.pi
 WIDTH,HEIGHT = 400,400
 EPS,NOHIT = 1e-8,inf
 inf3,nan3,INone = vec3(inf),vec3(nan),-1
@@ -99,7 +96,7 @@ class Interaction:
                 # ① bitangent是 -tan.y tan.x (即逆时针旋转90°,注意在RaySpace下看向+z(即光线方向)时，y指向上，x指向左). ②注意tm.rot_by_axis第二个参数表示顺时针旋转的弧度
                 bitangentR = (tm.rot_by_axis(tangentR,tm.asin(self.v))@vec4(-tangentR.y,tangentR.x,0,0)).xyz
                 self.tangent,self.bitangent = tangent,(w2r.inverse()@vec4(bitangentR,0)).xyz.normalized()
-                self.normal,self.mat = self.bitangent.cross(self.tangent).normalized(),scene.hair_materials[self.oi]
+                self.normal = self.bitangent.cross(self.tangent).normalized()
             else:
                 self.mat,self.normal = scene.face_materials[self.oi-scene.cn],scene.face_normals[self.oi-scene.cn]
                 self.tangent = vec3(-self.normal.y,self.normal.x,0).normalized() if (self.normal.x!=0 or self.normal.y!=0) else vec3(-self.normal.z,0,self.normal.x).normalized()
@@ -174,7 +171,7 @@ class Bezier:
         if L0 > 0:
             eps = ti.max(self.w[0], self.w[1]) * 0.05
             value = 1.41421356237 * 6.0 * L0 / (8.0 * eps)
-            if value > 0: self.sub_n = int(ti.math.clamp(ti.math.log2(value) / 2, 0, 10))
+            if value > 0: self.sub_n = int(tm.clamp(tm.log2(value) / 2, 0, 10))
         self.bmin,self.bmax = ti.min(self.p0,self.p1,self.p2,self.p3),ti.max(self.p0,self.p1,self.p2,self.p3)
         self.bmin -= vec3(self.w.max())
         self.bmax += vec3(self.w.max())
@@ -191,7 +188,7 @@ class Bezier:
         stack.Push(p0, p1, p2, p3,vec2(0,1),0)
         while stack.n > 0 and ret[0]==NOHIT:
             p0, p1, p2, p3,u, depth = stack.Pop()
-            width = vec2(ti.math.mix(self.w[0],self.w[1],u[0]),ti.math.mix(self.w[0],self.w[1],u[1]))
+            width = vec2(tm.mix(self.w[0],self.w[1],u[0]),tm.mix(self.w[0],self.w[1],u[1]))
             bezier = Bezier(p0=p0,p1=p1,p2=p2,p3=p3,w=width).Init()  # ray space bezier
             if depth < self.sub_n:  # check box intersect & possibly subdivide
                 if bezier.bmin.x <= 0 <= bezier.bmax.x and bezier.bmin.y <= 0 <= bezier.bmax.y and bezier.bmax.z >= 0: # ray INTERSECT with box
@@ -201,31 +198,50 @@ class Bezier:
                 if (p1.y - p0.y)*-p0.y + p0.x * (p0.x - p1.x) < 0 or (p2.y - p3.y) * -p3.y + p3.x * (p3.x - p2.x)<0:continue
                 uH = (p3.xy-p0.xy).dot(-p0.xy)/(p3.xy-p0.xy).norm_sqr()  # hitU ∈ [0,1]
                 hitpos_ray_space = bezier.At(uH)
-                if  hitpos_ray_space.xy.norm_sqr() > ti.math.mix(width[0],width[1],uH)**2 : continue
-                ret[0],ret[1] = hitpos_ray_space.z,ti.math.mix(u[0],u[1],uH)  # 最顶层的bezier的参数坐标
+                if  hitpos_ray_space.xy.norm_sqr() > tm.mix(width[0],width[1],uH)**2 : continue
+                ret[0],ret[1] = hitpos_ray_space.z,tm.mix(u[0],u[1],uH)  # 最顶层的bezier的参数坐标
         return ret
 
 Sample = ti.types.struct(pdf=ti.f64, ray=Ray, value=vec3) # bxdf sample or phase function sample. value is bxdf value or phase function value
 
-# TODO 考虑头发鳞片的alpha角度
 # NOTE: p_max is 3
-@ti.dataclass
-class HairBxDF:
-    sigma_a:vec3
-    eta:ti.f64
-    beta_m:ti.f64
-    beta_n:ti.f64
-    alpha:ti.f64
-    s:ti.f64 # for Np()
-    v:vec4   # for Mp()
-    def Init(self):
+class HairMaterial:
+    def __init__(self,sigma_a,eta,beta_m,beta_n,alpha):
+        self.sigma_a,self.eta,self.beta_m,self.beta_n,self.alpha = vec3(sigma_a[0],sigma_a[1],sigma_a[2]),eta,beta_m,beta_n,alpha
         self.s = 0.626657069 * (0.265 * self.beta_n + 1.194 * self.beta_n**2 +5.372 * self.beta_n**22)
         v0 = (0.726 * self.beta_m + 0.812*self.beta_m**2 + 3.7 *self.beta_m**20)**2
         self.v = vec4(v0,0.25*v0,4*v0,4*v0)
-        return self
+# a default hair material
+hair_mat = HairMaterial((0.094462,0.150954,0.237602),1.55,0.25,0.3,2)
+
+class BxDF:
+    class Type(enum.IntEnum):
+        Lambertian = enum.auto() # reflection_diffuse
+        Specular = enum.auto()   # reflection_specular
+        Transmission = enum.auto() # reflection_specular  transmission_specular
+        Microfacet  = enum.auto()  # reflection_glossy
+        Hair = enum.auto()
+    @ti.func
+    def ToWorld(localCoord:vec3,worldNormal:vec3,worldTangent:vec3):
+        binormal = worldNormal.cross(worldTangent)
+        return localCoord[0]*worldTangent+localCoord[1]*worldNormal+localCoord[2]*binormal
+    @ti.func
+    def ToLocal(v:vec3,normal:vec3,tangent:vec3):
+        binormal = normal.cross(tangent)
+        return vec3(v.dot(tangent),v.dot(normal),v.dot(binormal))
+    @ti.func
+    def CosineSampleHemisphere():
+        phi, cos_theta = 2 * tm.pi * ti.random(), ti.sqrt(ti.random())
+        sin_theta = ti.sqrt(1 - cos_theta ** 2)
+        return vec3(sin_theta * ti.sin(phi), cos_theta, sin_theta * ti.cos(phi))
+
+    # TODO 考虑头发鳞片的alpha角度
+    # ========================================= HAIR BXDF ================================================
     # ----------------------------------- Mp -----------------------------------
     @ti.func
-    def Sinh(x): return 0.5 * (ti.exp(x) - ti.exp(-x))
+    def v(p): return hair_mat.v[0] if p==0 else (hair_mat.v[1] if p==1 else hair_mat.v[2] if p==2 else hair_mat.v[3])
+    @ti.func
+    def Sinh(x):return 0.5 * (ti.exp(x) - ti.exp(-x))
     @ti.func
     def I0(x):
         ret, x2i, ifact, i4 = ti.cast(0.0, ti.f64), ti.cast(1.0, ti.f64), ti.cast(1.0, ti.f64), ti.cast(1.0, ti.f64)
@@ -237,189 +253,118 @@ class HairBxDF:
         return ret
     @ti.func
     def LogI0(x):
-        ret = ti.cast(ti.log(HairBxDF.I0(x)), ti.f64)
+        ret = ti.cast(ti.log(BxDF.I0(x)), ti.f64)
         if x > 12: ret = x + 0.5 * (ti.log(1 / x) + 1 / (8 * x) - ti.log(2 * pi))
         return ret
     @ti.func
-    def Mp(p,cos_theta_i,sin_theta_i,cos_theta_o,sin_theta_o):
-        a,b = cos_theta_i*cos_theta_o/v[p],sin_theta_i*sin_theta_o/v[p]
-        return ti.exp(HairBxDF.LogI0(a)-b-1/v[p]+0.6931+ti.log(1/(2*v[p]))) if v[p]<0.1 else ti.exp(-b)*HairBxDF.I0(a)/(HairBxDF.Sinh(1/v[p])*2*v[p])
+    def Mp(p, cos_theta_i, sin_theta_i, cos_theta_o, sin_theta_o):
+        v = BxDF.v(p)
+        a, b = cos_theta_i * cos_theta_o / v, sin_theta_i * sin_theta_o / v
+        return ti.exp(BxDF.LogI0(a) - b - 1 /v + 0.6931 + ti.log(1 / (2 * v))) if v < 0.1 else ti.exp(-b) * BxDF.I0(a) / (BxDF.Sinh(1 / v) * 2 * v)
     # ----------------------------------- Np -----------------------------------
     @ti.func
-    def Logisitic(x,s): return ti.exp(-x/s)/(s*(1+ti.exp(-x/s))**2)
+    def Logisitic(x, s):return ti.exp(-x / s) / (s * (1 + ti.exp(-x / s)) ** 2)
     @ti.func
-    def LogisticCDF(x,s): return 1/(1+ti.exp(-x/s))
+    def LogisticCDF(x, s):return 1 / (1 + ti.exp(-x / s))
     @ti.func
-    def TrimmedLogistic(x,s,a,b): return HairBxDF.Logisitic(x,s)/(HairBxDF.LogisticCDF(b,s)-HairBxDF.LogisticCDF(a,s))
+    def TrimmedLogistic(x, s, a, b):return BxDF.Logisitic(x, s) / (BxDF.LogisticCDF(b, s) - BxDF.LogisticCDF(a, s))
     @ti.func
-    def Phi(p,gamma_o,gamma_t):return 2*p*gamma_t-2*gamma_o+p*pi
+    def Phi(p, gamma_o, gamma_t):return 2 * p * gamma_t - 2 * gamma_o + p * pi
     # expect phi is φi-φo
     @ti.func
-    def Np(p,phi,gamma_o,gamma_t):
-        dphi = phi-HairBxDF.Phi(p,gamma_o,gamma_t)
-        while dphi>pi:dphi -= 2*pi
-        while dphi<-pi:dphi += 2*pi
-        return HairBxDF.TrimmedLogistic(dphi,self.s,-pi,pi)
+    def Np(p, phi, gamma_o, gamma_t):
+        dphi = phi - BxDF.Phi(p, gamma_o, gamma_t)
+        while dphi > pi: dphi -= 2 * pi
+        while dphi < -pi: dphi += 2 * pi
+        return BxDF.TrimmedLogistic(dphi, hair_mat.s, -pi, pi)
     # ----------------------------------- Ap -----------------------------------
     @ti.func
-    def Fresnel(etai,etat,cos_theta_i):
-        cos_theta_i = tm.clamp(cos_theta_i,-1,1)
-        sin_theta_i = ti.sqrt(1-cos_theta_i**2)
-        sin_theta_t = sin_theta_i*etai/etat
-        cos_theta_t = ti.sqrt(1-sin_theta_t*sin_theta_t)
-        r_prep = (etat*cos_theta_i-etai*cos_theta_t)/(etat*cos_theta_i+etai*cos_theta_t)
-        r_parl = (etai*cos_theta_i-etat*cos_theta_t) / (etai*cos_theta_i+etat*cos_theta_t)
-        return 0.5*(r_prep**2+r_parl**2)
+    def Fresnel(etai, etat, cos_theta_i):
+        cos_theta_i = tm.clamp(cos_theta_i, -1, 1)
+        sin_theta_i = ti.sqrt(1 - cos_theta_i ** 2)
+        sin_theta_t = sin_theta_i * etai / etat
+        cos_theta_t = ti.sqrt(1 - sin_theta_t * sin_theta_t)
+        r_prep = (etat * cos_theta_i - etai * cos_theta_t) / (etat * cos_theta_i + etai * cos_theta_t)
+        r_parl = (etai * cos_theta_i - etat * cos_theta_t) / (etai * cos_theta_i + etat * cos_theta_t)
+        return 0.5 * (r_prep ** 2 + r_parl ** 2)
     @ti.func
-    def A(self,cos_theta_o,T:vec3):  # return (A0,A1,A2,A3)
-        f = HairBxDF.Fresnel(1.0,self.eta,cos_theta_o)  # air to hair
-        return (vec3(f),(1-f)**2*T,(1-f)**2*f*T**2,(1-f)**2*f**2*T**3/(1-T*f))
+    def A(cos_theta_o, T: vec3):  # return (A0,A1,A2,A3)
+        f = BxDF.Fresnel(1.0, hair_mat.eta, cos_theta_o)  # air to hair
+        return (vec3(f), (1 - f) ** 2 * T, (1 - f) ** 2 * f * T ** 2, (1 - f) ** 2 * f ** 2 * T ** 3 / (1 - T * f))
     # ---------------------------------- bxdf value ----------------------------
     @ti.func
-    def f(self,wo,wi):
-        cto,cti = wo[0],wi[0]  # cos(θo) cos(θi)
-        sto,sti = ti.sqrt(1-cto**2),ti.sqrt(1-cti**2) # sin(θo) sin(θi)
-        phiO,phiI = ti.atan2(wo[1],wo[2]),ti.atan2(wi[1],wi[2])
-        spo,spi,cpo,cpi = ti.sin(phiO),ti.sin(phiI),ti.cos(phiO),ti.cos(phiI) # sin(φo) sin(φi) cos(φo) cos(φi)
-        gammaO = phiO-pi/2  # see hair asset's image file for illustration
-        sgo,eta_prime = ti.sin(gammaO), ti.sqrt((self.eta**2-sto**2))/cto
-        stt,sgt = sto/self.eta, sgo/eta_prime  # sin(θt) sin(γt)
-        ctt,cgt,gammaT = ti.sqrt(1-stt**2),ti.sqrt(1-cgt**2),ti.asin(sgt)  # cos(θt) cos(γt)  看pbrt的配图分析，γt应该总是和γo符号相同的
-        assert cgt*ctt >= 0
-        Ap = self.A(cto,ti.exp(-self.sigma_a*2*cgt/ctt))
+    def HairF(wo, wi):
+        sto, sti = wo[0], wi[0]  # sin(θo) sin(θi)
+        cto, cti = ti.sqrt(1 - sto ** 2), ti.sqrt(1 - sti ** 2)  # cos(θo) cos(θi)
+        phiO, phiI = ti.atan2(wo[1], wo[2]), ti.atan2(wi[1], wi[2])
+        spo, spi, cpo, cpi = ti.sin(phiO), ti.sin(phiI), ti.cos(phiO), ti.cos(phiI)  # sin(φo) sin(φi) cos(φo) cos(φi)
+        gammaO = phiO - pi / 2  # see hair asset's image file for illustration
+        sgo, eta_prime = ti.sin(gammaO), ti.sqrt((hair_mat.eta ** 2 - sto ** 2)) / cto
+        stt, sgt = sto / hair_mat.eta, sgo / eta_prime  # sin(θt) sin(γt)
+        ctt, cgt, gammaT = ti.sqrt(1 - stt ** 2), ti.sqrt(1 - sgt ** 2), ti.asin(sgt)  # cos(θt) cos(γt)  看pbrt的配图分析，γt应该总是和γo符号相同的
+        assert cgt * ctt >= 0
+        Ap = BxDF.A(cto, ti.exp(-hair_mat.sigma_a * 2 * cgt / ctt))
         ret = vec3(0)
-        for i in ti.static(range(PMAX)):
-            ret+=Ap[i]*HairBxDF.Mp(p,cti,sti,cto,sto)*HairBxDF.Np(p,phiI-phiO,gammaO,gammaT)
-        ret+=Ap[PMAX]*HairBxDF.Mp(PMAX,cti,sti,cto,sto)/(2*pi)   # just use a uniform distribution  for the azimuthal distribution
+        for i in ti.static(range(PMAX + 1)):
+            ret += Ap[i] * BxDF.Mp(i, cti, sti, cto, sto) * (0.5 / pi if i == PMAX else BxDF.Np(i, phiI - phiO, gammaO, gammaT))
         return ret
     # ---------------------------------- Sampling & PDF ----------------------------
     # 公式9.49上面有一句话，quote “The design goals of the model implemented here were that it be normalized (ensuring both energy conservation and no energy loss) and that it could be sampled directly.”
     @ti.func
-    def Sample(self,wo):
-        r0,r1,r2 = ti.random(),ti.random(),ti.random()
-        cto,phiO = wo[0],ti.atan2(wo[1],wo[2])
-        sto,gammaO = ti.sqrt(1-cto**2),phiO-pi/2
-        sgo, eta_prime = ti.sin(gammaO), ti.sqrt((self.eta ** 2 - sto ** 2)) / cto
-        stt, sgt = sto / self.eta, sgo / eta_prime  # sin(θt) sin(γt)
-        ctt, cgt, gammaT = ti.sqrt(1 - stt ** 2), ti.sqrt(1 - cgt ** 2), ti.asin(sgt)
-        Ap = self.A(cto,ti.exp(-self.sigma_a*2*cgt/ctt))
+    def InvertLogisticSample(x, s):     return 1 / (1 + ti.exp(-x / s))
+    @ti.func
+    def SampleLogistic(u, s):return -s * ti.log(1 / u - 1)
+    @ti.func
+    def SampleTrimmedLogistic(u, s, a, b):
+        u = tm.mix(BxDF.InvertLogisticSample(a, s), BxDF.InvertLogisticSample(b, s), u)
+        x = BxDF.SampleLogistic(u, s)
+        return tm.clamp(x, a, b)
+    @ti.func
+    def HairSample(wo):
+        r0, r1, r2, r3 = ti.random(), ti.random(), ti.random(), ti.random()
+        sto, phiO = wo[0], ti.atan2(wo[1], wo[2])
+        cto, gammaO = ti.sqrt(1 - sto ** 2), phiO - pi / 2
+        sgo, eta_prime = ti.sin(gammaO), ti.sqrt((hair_mat.eta ** 2 - sto ** 2)) / cto
+        stt, sgt = sto / hair_mat.eta, sgo / eta_prime  # sin(θt) sin(γt)
+        ctt, cgt, gammaT = ti.sqrt(1 - stt ** 2), ti.sqrt(1 - sgt ** 2), ti.asin(sgt)
+        Ap = BxDF.A(cto, ti.exp(-hair_mat.sigma_a * 2 * cgt / ctt))
+        # normalize Ap and sample p  --------------------------------------------------------
+        Ap_ = vec4(Ap[0].sum(), Ap[1].sum(), Ap[2].sum(), Ap[3].sum())
+        Ap_ /= Ap_.sum()
+        ApCDF, p, v = vec4(Ap_[0], Ap_[0] + Ap_[1], Ap_[0] + Ap_[2] + Ap_[1], 1.0), ti.cast(0, ti.i32), hair_mat.v[0]
+        if ApCDF[0] <= p < ApCDF[1]:p, v = 1, hair_mat.v[1]
+        elif ApCDF[1] <= p < ApCDF[2]:p, v = 2, hair_mat.v[2]
+        else:p, v = 3, hair_mat.v[3]
+        # sample Mp ----------------------------------------------------------------------------------------------------------------
+        cosTheta = 1 + v * ti.log(ti.max(r1, 1e-5) + (1 - r1) * ti.exp(-2 / v))
+        sinTheta, cosPhi = ti.sqrt(1 - cosTheta ** 2), ti.cos(2 * pi * r2)
+        sinTheta_i = -cosTheta * sto + sinTheta * cosPhi * cto
+        cosTheta_i = ti.sqrt(1 - sinTheta_i ** 2)
+        # sample Np ----------------------------------------------------------------------------------------------------------------
+        dphi = 2 * pi * r3
+        if p < PMAX: dphi = BxDF.Phi(p, gammaO, gammaT) + BxDF.SampleTrimmedLogistic(r3, hair_mat.s, -pi, pi);
+        # sample DONE , let's make wi and compute pdf -------------------------------------------
+        phiI = phiO + dphi
+        wi, pdf = vec3(sinTheta_i, cosTheta_i * ti.sin(phiI), cosTheta_i * ti.cos(phiI)), ti.cast(0.0, ti.f64)
+        for i in ti.static(range(PMAX + 1)):
+            pdf += Ap_[i] * BxDF.Mp(i, cosTheta_i, sinTheta_i, cto, sto) * (0.5 / pi if i == PMAX else BxDF.Np(i, dphi, gammaO, gammaT))
+        return (wi, pdf)
 
-# a default hair material
-hair_bxdf = HairBxDF(sigma_a=vec3(0.094462,0.150954,0.237602),eta=1.55,beta_m=0.25,beta_n=0.3,alpha=2).Init()
-
-class BxDF:
-    class Type(enum.IntEnum):
-        Lambertian = enum.auto() # reflection_diffuse
-        Specular = enum.auto()   # reflection_specular
-        Transmission = enum.auto() # reflection_specular  transmission_specular
-        Microfacet  = enum.auto()  # reflection_glossy
-        Hair = enum.auto()
-
-    Sample = ti.types.struct(pdf=ti.f64,ray=Ray,value=vec3)
-    @ti.func
-    def CosTheta(w):return w.y
-    @ti.func
-    def CosTheta2(w): return w.y**2
-    @ti.func
-    def CosPhi2(w): return w.x**2/(1-BxDF.CosTheta2(w))
-    @ti.func
-    def SinPhi2(w): return 1 - BxDF.CosPhi2(w)
-
-    @ti.func
-    def SampleUniformDiskPolar(u):
-        r,theta = ti.sqrt(u[0]),2*tm.pi*u[1]
-        return r*ti.cos(theta),r*ti.sin(theta)
-    @ti.func
-    def Sample_wm(w,u,ax,az):
-        wh = vec3(ax*w.x,w.y,az*w.z).normalized()
-        if wh.y<0:wh.y=-wh.y
-        t1 = vec3(0,1,0).cross(wh).normalized() if wh.y<0.999999 else vec3(1,0,0)
-        t2 = wh.cross(t1)
-        p = BxDF.SampleUniformDiskPolar(u)
-        h = ti.sqrt(1-p[0]**2)
-        p[1] = (1-(1 + wh.y) / 2) * h + (1 + wh.y) / 2 * p[1]
-        # p[1] = (1+wh.y)*0.5*(1-p[1])+h*p[1]
-        pz = ti.sqrt(ti.max(0,1-p[0]**2-p[1]**2))
-        nh = p[0]*t1+pz*wh+p[1]*t2
-        return vec3(ax*nh[0],ti.max(EPS,nh[1]),az*nh[2]).normalized()
-    @ti.func
-    def CosineSampleHemisphere():
-        phi,cos_theta = 2*tm.pi*ti.random(),ti.sqrt(ti.random())
-        sin_theta = ti.sqrt(1-cos_theta**2)
-        return vec3(sin_theta*ti.sin(phi),cos_theta,sin_theta*ti.cos(phi))
-    @ti.func
-    def ToWorld(localCoord:vec3,worldNormal:vec3,worldTangent:vec3):
-        binormal = worldNormal.cross(worldTangent)
-        return localCoord[0]*worldTangent+localCoord[1]*worldNormal+localCoord[2]*binormal
-    @ti.func
-    def ToLocal(v:vec3,normal:vec3,tangent:vec3):
-        binormal = normal.cross(tangent)
-        return vec3(v.dot(tangent),v.dot(normal),v.dot(binormal))
-    @ti.func
-    def Reflect(wi, n):return (2 * n * wi.dot(n)-wi).normalized()
-    @ti.func #https://seblagarde.wordpress.com/2013/04/29/memo-on-fresnel-equations/ eq([1])
-    def Fresnel(i, n, mdmI, mdmT):  # only consider Dielectric-Conductor Dielectric-Dielectric
-        eta,etak,cos_theta = mdmT.eta/mdmI.eta,mdmT.k/mdmI.eta,ti.abs(i.dot(n))
-        cos_theta2 = cos_theta**2
-        sin_theta2 = 1 - cos_theta2
-        eta2,etak2 = eta**2,etak**2
-        t0 = eta2-etak2-sin_theta2
-        A2plusB2 = ti.sqrt(t0**2+4*etak**2)
-        t1,a = A2plusB2+cos_theta2,ti.sqrt(0.5*(A2plusB2+t0))
-        t2 = 2*a*cos_theta
-        Rs = (t1-t2) /(t1+t2)
-        t3,t4 = cos_theta2*A2plusB2+sin_theta2**2,t2*sin_theta2
-        Rp = Rs*(t3-t4)/(t3+t4)
-        return 0.5 * (Rs+Rp)
-    @ti.func  # https://pbr-book.org/4ed/Reflection_Models/Roughness_Using_Microfacet_Theory eq(9.16)
-    def D(w,ax,ay):
-        ct2,cp2,sp2 = BxDF.CosTheta2(w),BxDF.CosPhi2(w),BxDF.SinPhi2(w)
-        return 1.0/(tm.pi*ax*ay*ct2**2*(1+(1/ct2-1)*(cp2/ax**2+sp2/ay**2))**2)
-    @ti.func  # https://pbr-book.org/4ed/Reflection_Models/Roughness_Using_Microfacet_Theory eq(9.20)
-    def Lambda(w,ax,ay):
-        ct2,cp2,sp2 = BxDF.CosTheta2(w),BxDF.CosPhi2(w),BxDF.SinPhi2(w)
-        return ti.sqrt(1+(ax**2*cp2+ay**2*sp2)*(1/ct2-1))/2-0.5
-    @ti.func  # https://pbr-book.org/4ed/Reflection_Models/Roughness_Using_Microfacet_Theory eq(9.22)
-    def G(wi,wo,ax,ay):return 1.0/(1.0+BxDF.Lambda(wi,ax,ay)+BxDF.Lambda(wo,ax,ay))
-    @ti.func
-    def G1(w,ax,ay): return 1.0 / (1.0 + BxDF.Lambda(w, ax,ay) )
-    @ti.func
-    def D_PDF(w,wm,ax,ay):return BxDF.G1(w,ax,ay)/ti.abs(BxDF.CosTheta(w))*BxDF.D(wm,ax,ay)*ti.abs(w.dot(wm))
     @ti.func
     def Sample(ix:Interaction):
         assert ix.ray.mdm.eta.sum() != 0
         N,T,n = ix.normal,ix.tangent,vec3(0,1,0)  # N: world normal, T: world tangent, n: local normal
         wo,wi,pdf,f = BxDF.ToLocal(-ix.ray.d,N,T).normalized(),vec3(0),0.,vec3(inf,0,0) # use inf RED to expose problem
         # next_ix_inside_mesh = ix.inside_mesh # next intersection inside mesh : default is same with current
+        nextRayO = ix.pos
         if ix.mat.type==BxDF.Type.Lambertian:
             wi = BxDF.CosineSampleHemisphere()
             pdf = wi.y/tm.pi
             f = ix.mat.albedo/tm.pi
-            nextRayO = ix.pos+ix.normal*EPS
-        # elif ix.mat.type==BxDF.Type.Specular:
-        #     wi,pdf = BxDF.Reflect(wo,n),1
-        #     f = vec3(1)/ti.abs(BxDF.CosTheta(wi)) # https://pbr-book.org/4ed/Reflection_Models/Conductor_BRDF  eq(9.9)
-        # elif ix.mat.type==BxDF.Type.Transmission:
-        #     cosI,eta = wo.dot(n), ix.mdmT.eta/ix.ray.mdm.eta
-        #     if cosI<0:cosI,n = -cosI,-n
-        #     wi =  (-wo/eta + (cosI/eta - ti.sqrt(1 - (1/eta)**2 * (1 -cosI**2))) * n).normalized()
-        #     if ti.random()<BxDF.Fresnel(wo,n,ix.ray.mdm,ix.mdmT)[0]: # for Dielectric to Dielectric fresnel's rgb are identical
-        #         wi = BxDF.Reflect(wo,n)
-        #     else: next_ix_inside_mesh = not next_ix_inside_mesh # refraction happens: mesh to air or air to mesh
-        #     pdf,f = 1,vec3(1)/ti.abs(BxDF.CosTheta(wi))
-        # elif ix.mat.type==BxDF.Type.Microfacet:
-        #     ax,ay = ix.mat.ax,ix.mat.ay
-        #     wm = BxDF.Sample_wm(wo,[ti.random(),ti.random()],ax,ay)
-        #     wi = BxDF.Reflect(wo, wm)
-        #     # https://pbr-book.org/4ed/Reflection_Models/Roughness_Using_Microfacet_Theory eq(9.33)
-        #     pdf = BxDF.D_PDF(wo,wm,ax,ay)/4/ti.abs(wo.dot(wm))
-        #     f   = BxDF.D(wm,ax,ay)*BxDF.G(wi,wo,ax,ay)*BxDF.Fresnel(wo, wm, ix.ray.mdm, ix.mdmT) / ti.abs(4 * BxDF.CosTheta(wi) * BxDF.CosTheta(wo))
-        # assume pmax==3, so use vec4 to store values
+            nextRayO += ix.normal*EPS
         elif ix.mat.type==BxDF.Type.Hair:
-            wi,pdf = hair_bxdf.Sample()
-            f = hair_bxdf.f(wo,wi)
-            nextRayO = ix.pos
-        # if next_ix_inside_mesh:nextRayO,nextRayMdm = ix.pos - ix.normal*EPS,   ix.mat.mdm
+            wi,pdf = BxDF.HairSample(wo)
+            f = BxDF.HairF(wo,wi)
         return Sample(pdf=pdf,  ray=Ray(o=nextRayO,d=BxDF.ToWorld(wi,N,T).normalized(),mdm=Air), value=f)
 
 class Utils:
@@ -438,7 +383,7 @@ class Utils:
     #https://www.pbr-book.org/4ed/Geometry_and_Transformations/Vectors#CoordinateSystemfromaVector
     @ti.func
     def CoordinateSystem(v):
-        sign = ti.math.sign(v.z) if v.z!=0 else 1
+        sign = tm.sign(v.z) if v.z!=0 else 1
         a = -1/(sign+v.z)
         b = v.x*v.y*a
         return vec3(1+sign*v.x**2*a,sign*b,-sign*v.x),vec3(b,sign+v.y**2*a,-v.y)
@@ -446,7 +391,7 @@ class Utils:
     def LookAt(pos,target,up):
         d = (target - pos).normalized()
         r = (up.normalized().cross(d)).normalized()
-        newup,m = d.cross(r).normalized(),ti.math.eye(4)
+        newup,m = d.cross(r).normalized(),tm.eye(4)
         for i in ti.static(range(3)): m[i,3],m[i,0],m[i,1],m[i,2] = pos[i],r[i],newup[i],d[i]
         return m.inverse()
 
@@ -545,7 +490,7 @@ class BVH:
 @ti.data_oriented
 class Scene:
     def __init__(self,hair_json_path,meshes,furnace_test=False,camera = Camera(pos=vec3(0,11.5,-30),target=(0,11.5,0))):
-        self.furnace,self.maxdepth = furnace_test,6 if not furnace_test else 100
+        self.furnace,self.maxdepth = furnace_test,51 if not furnace_test else 100
         self.env_Le = vec3(0.5) if furnace_test else vec3(0)
         self.img = ti.Vector.field(3,ti.f64,(WIDTH,HEIGHT))
         self.camera = camera
@@ -577,7 +522,6 @@ class Scene:
         self.hair = Bezier.field(shape = self.cn)
         # TODO:舍去截断
         self.cn = 500000
-        self.hair_materials = Material.field(shape=self.cn)
         self.boxmins,self.boxmaxs = ti.Vector.field(3,ti.f64,self.cn+self.fn),ti.Vector.field(3,ti.f64,self.cn+self.fn)
         self.Init(np.array(hair_data,dtype=np.float64).reshape(-1,14))  # 3*4+2  (4 control points + width at start and end )
         self.bvh = BVH((self.boxmins.to_numpy(),self.boxmaxs.to_numpy()))
@@ -593,9 +537,6 @@ class Scene:
                                   w  = vec2(curves[i][12],curves[i][13])).Init()
             self.boxmins[i] = self.hair[i].bmin
             self.boxmaxs[i] = self.hair[i].bmax
-            self.hair_materials[i] = hair_def_mat
-            self.hair_materials[i].type,self.hair_materials[i].ay = BxDF.Type.Hair,0.25
-            self.hair_materials[i].mdm.sa = vec3(ti.random(),ti.random(),ti.random())
         for i in range(self.fn):
             f = self.faces[i]
             self.boxmins[i + self.cn] = ti.min(self.vertices[f[0]],self.vertices[f[1]],self.vertices[f[2]])
@@ -639,16 +580,19 @@ class Scene:
             L,beta = vec3(0),vec3(1)
             for _ in range(self.maxdepth):
                 ix = self.HitBy(ray)
+                if not ix.Valid() :
+                    L += beta*self.env_Le
+                    break
                 L += beta* ix.mat.Le
                 sample = BxDF.Sample(ix)
                 beta *= sample.value*ti.abs(sample.ray.d.dot(ix.normal))/sample.pdf
                 ray = sample.ray
-                if ix.mat.type==BxDF.Type.Lambertian:L = ix.mat.albedo
-                elif ix.mat.type==BxDF.Type.Hair:L = (ix.bitangent)
-                break
-                if not ix.Valid() :
-                    L += beta*self.env_Le
-                    break
+                # if ix.mat.type==BxDF.Type.Lambertian:L = ix.mat.albedo
+                # elif ix.mat.type==BxDF.Type.Hair:L = (ix.bitangent)
+                # break
+                # if not ix.Valid() :
+                #     L += beta*self.env_Le
+                #     break
                 # L = ix.normal *0.5+0.5
             self.img[i,j] = L
 
