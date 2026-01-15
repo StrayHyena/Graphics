@@ -3,7 +3,7 @@ import taichi.math as tm
 import numpy as np
 import trimesh,enum,json,time
 
-ti.init(arch=ti.cpu,default_fp  =ti.f64,debug=True)
+ti.init(arch=ti.gpu,default_fp  =ti.f64)#,debug=True)
 Array   = ti.types.vector(200,ti.i32)
 vec2,vec3,vec4     = ti.types.vector(2,ti.f64),ti.types.vector(3,ti.f64),ti.types.vector(4,ti.f64)
 vec3i   = ti.types.vector(3, ti.i32)
@@ -13,7 +13,7 @@ Material = ti.types.struct(albedo=vec3,Le=vec3,mdm=Medium,type=ti.i32,ax=ti.f64,
 PMAX = 3
 
 nan,inf,pi = tm.nan,tm.inf,tm.pi
-WIDTH,HEIGHT = 400,400
+WIDTH,HEIGHT = 200,200
 EPS,NOHIT = 1e-8,inf
 inf3,nan3,INone = vec3(inf),vec3(nan),-1
 # https://refractiveindex.info/  R 630 nm ,G 532 nm ,B 465 nm
@@ -21,87 +21,6 @@ inf3,nan3,INone = vec3(inf),vec3(nan),-1
 Air,Glass,Gold = Medium(eta=vec3(1),k=vec3(0)),Medium(eta=vec3(1.5),k=vec3(0)),Medium(eta=vec3(0.18836,0.54386,1.3319),k=vec3(3.4034,2.2309,1.8693))
 MdmNone = Medium(eta=vec3(0))
 BEZIER_STACK_N = 11
-
-@ti.dataclass
-class Ray:
-    o:vec3
-    d:vec3
-    mdm:Medium
-    @ti.func
-    def At(self, t):return self.o+self.d*t
-    @ti.func
-    def HitTriangle(self,v0,v1,v2):
-        ret = NOHIT
-        e0,e1 = v1-v0,v2-v0
-        h = self.d.cross(e1)
-        a = e0.dot(h)
-        if ti.abs(a) > EPS:
-            f,s = 1/a,self.o-v0
-            u = f*s.dot(h)
-            q = s.cross(e0)
-            v = f*q.dot(self.d)
-            t = f*e1.dot(q)
-            if 0<=u<=1 and 0<=v<=1 and u+v<=1 and t>EPS: ret = t
-        return ret
-    @ti.func
-    def HitAABB(self,bmin,bmax):
-        t_enter,t_exit,t,isHit,originInsideBox = -NOHIT,NOHIT,NOHIT,True,True
-        for i in ti.static(range(3)):
-            if self.o[i]<bmin[i] or self.o[i]>bmax[i]: originInsideBox = False
-            if self.d[i]==0:
-                if bmin[i]>self.o[i] or self.o[i]>bmax[i] : isHit = False
-            else:
-                t0,t1 = (bmin[i]-self.o[i])/self.d[i],(bmax[i]-self.o[i])/self.d[i]
-                if self.d[i]<0:t0,t1=t1,t0
-                t_enter,t_exit = max(t_enter,t0),min(t_exit,t1)
-        if t_enter<=t_exit and t_exit>=0: t = t_enter if t_enter>=0 else t_exit
-        return -1.0 if originInsideBox else (t if isHit else NOHIT)
-
-@ti.dataclass
-class Interaction:
-    t:ti.f64    # hit time of ray
-    oi:ti.i32   # object(curve or triangle) index
-    ray:Ray
-    u:ti.f64    # surface parameter coordinate u component  [0,1]
-    v:ti.f64    # surface parameter coordinate v component  [-1,1]
-    tangent:vec3  # local farme -- x Axis
-    normal:vec3   # local farme -- y Axis
-    bitangent:vec3
-    pos:vec3      # hit position
-    mat:Material
-    # inside_mesh:ti.u1
-    # mdmT:Medium
-    @ti.func
-    def Valid(self):return self.t!=NOHIT
-    @ti.func
-    def Init(self,scene):
-        if self.Valid():
-            self.pos = self.ray.At(self.t)
-            if self.oi<scene.cn:
-                bezier = scene.hair[self.oi]
-                dx = self.ray.d.cross(bezier.p3 - bezier.p0)
-                if dx.norm() < 1e-20: dx, _ = Utils.CoordinateSystem(self.ray.d)
-                w2r = Utils.LookAt(self.ray.o, self.ray.o + self.ray.d,dx)  # world space to ray space. NOTE that curve's space is identical to world space (i.e. model matrix is Eye3)
-                curvepos,tangent,width = bezier.At(self.u), bezier.TangentAt(self.u).normalized(),tm.mix(bezier.w[0],bezier.w[1],self.u)
-                curveposR,tangentR = (w2r@vec4(curvepos,1)).xyz,(w2r@vec4(tangent,0)).xyz  # suffix R means Ray Space
-                # 右手坐标系，tanget是+x ; normal +y; bitangent +z
-                self.v = (curvepos-self.pos).norm()/width  # 默认在曲线右边，是个正值 (在z轴上)。对应的是从0°顺时针旋转
-                # Edge Function 判断点P在有向线段AB的哪一侧：
-                # E(P) = (Bx - Ax) * (Py - Ay) - (By - Ay) * (Px - Ax)
-                # E(P) > 0 点P在AB的左侧
-                # 在Ray Space下(可以忽略z坐标)，现在要判断交点在tangent的哪一侧
-                # 此时P = (0, 0) A = curveposR  B = curveposR + tangentR
-                # 所以，E(P) = tangentR.x * -curveposR.y + curveposR.x * tangentR.y
-                if tangentR.x * -curveposR.y + curveposR.x * tangentR.y > 0: self.v=-self.v # Edge Function: 在tangent左边的话是负值
-                # ① bitangent是 -tan.y tan.x (即逆时针旋转90°,注意在RaySpace下看向+z(即光线方向)时，y指向上，x指向左). ②注意tm.rot_by_axis第二个参数表示顺时针旋转的弧度
-                bitangentR = (tm.rot_by_axis(tangentR,tm.asin(self.v))@vec4(-tangentR.y,tangentR.x,0,0)).xyz
-                self.tangent,self.bitangent = tangent,(w2r.inverse()@vec4(bitangentR,0)).xyz.normalized()
-                self.normal = self.bitangent.cross(self.tangent).normalized()
-            else:
-                self.mat,self.normal = scene.face_materials[self.oi-scene.cn],scene.face_normals[self.oi-scene.cn]
-                self.tangent = vec3(-self.normal.y,self.normal.x,0).normalized() if (self.normal.x!=0 or self.normal.y!=0) else vec3(-self.normal.z,0,self.normal.x).normalized()
-                # print(self.oi,self.normal,self.tangent)
-        return self
 
 @ti.dataclass
 class NodeStack:  # node stack for bvh tree traversal
@@ -198,11 +117,9 @@ class Bezier:
                 if (p1.y - p0.y)*-p0.y + p0.x * (p0.x - p1.x) < 0 or (p2.y - p3.y) * -p3.y + p3.x * (p3.x - p2.x)<0:continue
                 uH = (p3.xy-p0.xy).dot(-p0.xy)/(p3.xy-p0.xy).norm_sqr()  # hitU ∈ [0,1]
                 hitpos_ray_space = bezier.At(uH)
-                if  hitpos_ray_space.xy.norm_sqr() > tm.mix(width[0],width[1],uH)**2 : continue
+                if hitpos_ray_space.z<0 or hitpos_ray_space.xy.norm_sqr() > tm.mix(width[0],width[1],uH)**2 : continue
                 ret[0],ret[1] = hitpos_ray_space.z,tm.mix(u[0],u[1],uH)  # 最顶层的bezier的参数坐标
         return ret
-
-Sample = ti.types.struct(pdf=ti.f64, ray=Ray, value=vec3) # bxdf sample or phase function sample. value is bxdf value or phase function value
 
 # NOTE: p_max is 3
 class HairMaterial:
@@ -212,14 +129,94 @@ class HairMaterial:
         v0 = (0.726 * self.beta_m + 0.812*self.beta_m**2 + 3.7 *self.beta_m**20)**2
         self.v = vec4(v0,0.25*v0,4*v0,4*v0)
 # a default hair material
-hair_mat = HairMaterial((0.094462,0.150954,0.237602),1.55,0.25,0.3,2)
+hair_mat = HairMaterial((0.06,0.1,0.2),1.55,0.25,0.3,2)
+
+@ti.dataclass
+class Ray:
+    o:vec3
+    d:vec3
+    mdm:Medium
+    @ti.func
+    def At(self, t):return self.o+self.d*t
+    @ti.func
+    def HitTriangle(self,v0,v1,v2):
+        ret = NOHIT
+        e0,e1 = v1-v0,v2-v0
+        h = self.d.cross(e1)
+        a = e0.dot(h)
+        if ti.abs(a) > EPS:
+            f,s = 1/a,self.o-v0
+            u = f*s.dot(h)
+            q = s.cross(e0)
+            v = f*q.dot(self.d)
+            t = f*e1.dot(q)
+            if 0<=u<=1 and 0<=v<=1 and u+v<=1 and t>EPS: ret = t
+        return ret
+    @ti.func
+    def HitAABB(self,bmin,bmax):
+        t_enter,t_exit,t,isHit,originInsideBox = -NOHIT,NOHIT,NOHIT,True,True
+        for i in ti.static(range(3)):
+            if self.o[i]<bmin[i] or self.o[i]>bmax[i]: originInsideBox = False
+            if self.d[i]==0:
+                if bmin[i]>self.o[i] or self.o[i]>bmax[i] : isHit = False
+            else:
+                t0,t1 = (bmin[i]-self.o[i])/self.d[i],(bmax[i]-self.o[i])/self.d[i]
+                if self.d[i]<0:t0,t1=t1,t0
+                t_enter,t_exit = max(t_enter,t0),min(t_exit,t1)
+        if t_enter<=t_exit and t_exit>=0: t = t_enter if t_enter>=0 else t_exit
+        return -1.0 if originInsideBox else (t if isHit else NOHIT)
+Sample = ti.types.struct(pdf=ti.f64, ray=Ray, value=vec3) # bxdf sample or phase function sample. value is bxdf value or phase function value
+
+@ti.dataclass
+class Interaction:
+    t:ti.f64    # hit time of ray
+    oi:ti.i32   # object(curve or triangle) index
+    ray:Ray
+    u:ti.f64    #  hair surface parameter coordinate u component  [0,1]
+    v:ti.f64    #  hair surface parameter coordinate v component  [-1,1]
+    width:ti.f64 # hair cylinder width
+    tangent:vec3  # local farme -- x Axis
+    normal:vec3   # local farme -- y Axis
+    bitangent:vec3
+    pos:vec3      # hit position
+    mat:Material
+    # inside_mesh:ti.u1
+    # mdmT:Medium
+    @ti.func
+    def Valid(self):return self.t!=NOHIT
+    @ti.func
+    def Init(self,scene):
+        if self.Valid():
+            self.pos = self.ray.At(self.t)
+            if self.oi<scene.cn:
+                bezier = scene.hair[self.oi]
+                dx = self.ray.d.cross(bezier.p3 - bezier.p0)
+                if dx.norm() < 1e-20: dx, _ = Utils.CoordinateSystem(self.ray.d)
+                w2r = Utils.LookAt(self.ray.o, self.ray.o + self.ray.d,dx)  # world space to ray space. NOTE that curve's space is identical to world space (i.e. model matrix is Eye3)
+                curvepos,tangent,self.width = bezier.At(self.u), bezier.TangentAt(self.u).normalized(),tm.mix(bezier.w[0],bezier.w[1],self.u)
+                curveposR,tangentR = (w2r@vec4(curvepos,1)).xyz,(w2r@vec4(tangent,0)).xyz  # suffix R means Ray Space
+                # 右手坐标系，tanget是+x ; normal +y; bitangent +z
+                self.v = (curvepos-self.pos).norm()/self.width  # 默认在曲线右边，是个正值 (在z轴上)。对应的是从0°顺时针旋转
+                # Edge Function 判断点P在有向线段AB的哪一侧：
+                # E(P) = (Bx - Ax) * (Py - Ay) - (By - Ay) * (Px - Ax)
+                # E(P) > 0 点P在AB的左侧
+                # 在Ray Space下(可以忽略z坐标)，现在要判断交点在tangent的哪一侧
+                # 此时P = (0, 0) A = curveposR  B = curveposR + tangentR
+                # 所以，E(P) = tangentR.x * -curveposR.y + curveposR.x * tangentR.y
+                if tangentR.x * -curveposR.y + curveposR.x * tangentR.y > 0: self.v=-self.v # Edge Function: 在tangent左边的话是负值
+                # ① bitangent是 -tan.y tan.x (即逆时针旋转90°,注意在RaySpace下看向+z(即光线方向)时，y指向上，x指向左). ②注意tm.rot_by_axis第二个参数表示顺时针旋转的弧度
+                bitangentR = (tm.rot_by_axis(tangentR,tm.asin(self.v))@vec4(-tangentR.y,tangentR.x,0,0)).xyz
+                self.tangent,self.bitangent = tangent,(w2r.inverse()@vec4(bitangentR,0)).xyz.normalized()
+                self.normal,self.mat = self.bitangent.cross(self.tangent).normalized(),scene.hair_material
+            else:
+                self.mat,self.normal = scene.face_materials[self.oi-scene.cn],scene.face_normals[self.oi-scene.cn]
+                self.tangent = vec3(-self.normal.y,self.normal.x,0).normalized() if (self.normal.x!=0 or self.normal.y!=0) else vec3(-self.normal.z,0,self.normal.x).normalized()
+                # print(self.oi,self.normal,self.tangent)
+        return self
 
 class BxDF:
     class Type(enum.IntEnum):
-        Lambertian = enum.auto() # reflection_diffuse
-        Specular = enum.auto()   # reflection_specular
-        Transmission = enum.auto() # reflection_specular  transmission_specular
-        Microfacet  = enum.auto()  # reflection_glossy
+        Lambertian = enum.auto()
         Hair = enum.auto()
     @ti.func
     def ToWorld(localCoord:vec3,worldNormal:vec3,worldTangent:vec3):
@@ -311,9 +308,9 @@ class BxDF:
     # ---------------------------------- Sampling & PDF ----------------------------
     # 公式9.49上面有一句话，quote “The design goals of the model implemented here were that it be normalized (ensuring both energy conservation and no energy loss) and that it could be sampled directly.”
     @ti.func
-    def InvertLogisticSample(x, s):     return 1 / (1 + ti.exp(-x / s))
+    def InvertLogisticSample(x, s): return 1 / (1 + ti.exp(-x / s))
     @ti.func
-    def SampleLogistic(u, s):return -s * ti.log(1 / u - 1)
+    def SampleLogistic(u, s): return -s * ti.log(1 / u - 1)
     @ti.func
     def SampleTrimmedLogistic(u, s, a, b):
         u = tm.mix(BxDF.InvertLogisticSample(a, s), BxDF.InvertLogisticSample(b, s), u)
@@ -332,9 +329,9 @@ class BxDF:
         Ap_ = vec4(Ap[0].sum(), Ap[1].sum(), Ap[2].sum(), Ap[3].sum())
         Ap_ /= Ap_.sum()
         ApCDF, p, v = vec4(Ap_[0], Ap_[0] + Ap_[1], Ap_[0] + Ap_[2] + Ap_[1], 1.0), ti.cast(0, ti.i32), hair_mat.v[0]
-        if ApCDF[0] <= p < ApCDF[1]:p, v = 1, hair_mat.v[1]
-        elif ApCDF[1] <= p < ApCDF[2]:p, v = 2, hair_mat.v[2]
-        else:p, v = 3, hair_mat.v[3]
+        if ApCDF[0] <= r0 < ApCDF[1]:   p, v = 1, hair_mat.v[1]
+        elif ApCDF[1] <= r0 < ApCDF[2]: p, v = 2, hair_mat.v[2]
+        elif r0>=ApCDF[2]:              p, v = 3, hair_mat.v[3]
         # sample Mp ----------------------------------------------------------------------------------------------------------------
         cosTheta = 1 + v * ti.log(ti.max(r1, 1e-5) + (1 - r1) * ti.exp(-2 / v))
         sinTheta, cosPhi = ti.sqrt(1 - cosTheta ** 2), ti.cos(2 * pi * r2)
@@ -345,27 +342,29 @@ class BxDF:
         if p < PMAX: dphi = BxDF.Phi(p, gammaO, gammaT) + BxDF.SampleTrimmedLogistic(r3, hair_mat.s, -pi, pi);
         # sample DONE , let's make wi and compute pdf -------------------------------------------
         phiI = phiO + dphi
-        wi, pdf = vec3(sinTheta_i, cosTheta_i * ti.sin(phiI), cosTheta_i * ti.cos(phiI)), ti.cast(0.0, ti.f64)
+        f,wi, pdf = vec3(0),vec3(sinTheta_i, cosTheta_i * ti.sin(phiI), cosTheta_i * ti.cos(phiI)), ti.cast(0.0, ti.f64)
         for i in ti.static(range(PMAX + 1)):
-            pdf += Ap_[i] * BxDF.Mp(i, cosTheta_i, sinTheta_i, cto, sto) * (0.5 / pi if i == PMAX else BxDF.Np(i, dphi, gammaO, gammaT))
-        return (wi, pdf)
+            mp,np = BxDF.Mp(i, cosTheta_i, sinTheta_i, cto, sto),(0.5 / pi if i == PMAX else BxDF.Np(i, dphi, gammaO, gammaT))
+            pdf += Ap_[i] * mp  * np
+            f += Ap[i] * mp * np
+        return (f,wi,pdf)
 
     @ti.func
     def Sample(ix:Interaction):
         assert ix.ray.mdm.eta.sum() != 0
         N,T,n = ix.normal,ix.tangent,vec3(0,1,0)  # N: world normal, T: world tangent, n: local normal
         wo,wi,pdf,f = BxDF.ToLocal(-ix.ray.d,N,T).normalized(),vec3(0),0.,vec3(inf,0,0) # use inf RED to expose problem
-        # next_ix_inside_mesh = ix.inside_mesh # next intersection inside mesh : default is same with current
-        nextRayO = ix.pos
+        nextRayO,nextRatD = ix.pos,vec3(0)
         if ix.mat.type==BxDF.Type.Lambertian:
             wi = BxDF.CosineSampleHemisphere()
             pdf = wi.y/tm.pi
             f = ix.mat.albedo/tm.pi
-            nextRayO += ix.normal*EPS
+            nextRayO,nextRatD = nextRayO+ix.normal*EPS,BxDF.ToWorld(wi,N,T).normalized()
         elif ix.mat.type==BxDF.Type.Hair:
-            wi,pdf = BxDF.HairSample(wo)
-            f = BxDF.HairF(wo,wi)
-        return Sample(pdf=pdf,  ray=Ray(o=nextRayO,d=BxDF.ToWorld(wi,N,T).normalized(),mdm=Air), value=f)
+            f,wi,pdf = BxDF.HairSample(wo)
+            nextRatD = BxDF.ToWorld(wi,N,T).normalized()
+            nextRayO += nextRatD*EPS
+        return Sample(pdf=pdf,  ray=Ray(o=nextRayO,d=nextRatD,mdm=Air), value=f)
 
 class Utils:
     @staticmethod
@@ -373,12 +372,6 @@ class Utils:
         if len(arg)==1:return Material(albedo=vec3(arg[0],arg[0],arg[0]),Le=vec3(0),mdm = MdmNone,type=BxDF.Type.Lambertian)
         if len(arg)==3:return Material(albedo=vec3(arg[0],arg[1],arg[2]),Le=vec3(0),mdm = MdmNone,type=BxDF.Type.Lambertian)
         if len(arg)==6:return Material(albedo=vec3(arg[0],arg[1],arg[2]),Le=vec3(arg[3],arg[4],arg[5]),mdm = MdmNone,type=BxDF.Type.Lambertian)
-    @staticmethod
-    def MetalLike(m,rx,ry):return Material(Le=vec3(0),mdm=m,type=BxDF.Type.Microfacet,ax=rx,ay=ry)
-    @staticmethod
-    def GlassLike(eta): return Material(Le=vec3(0),mdm=Medium(eta = vec3(eta)),type=BxDF.Type.Transmission)
-    @staticmethod
-    def MirrorLike():return Material(Le=vec3(0),mdm = MdmNone,type=BxDF.Type.Specular)
     # make (v2, v3, v) 一个右手坐标系.要求v是normalized的
     #https://www.pbr-book.org/4ed/Geometry_and_Transformations/Vectors#CoordinateSystemfromaVector
     @ti.func
@@ -397,8 +390,10 @@ class Utils:
 
 class Mesh(trimesh.Trimesh):
     def __init__(self,objpath,material):
-        mesh = trimesh.load(objpath,process=False)
+        mesh = trimesh.load(objpath,process=False, maintain_order=True)
+        face_color = mesh.visual.face_colors.copy()
         super().__init__(vertices=mesh.vertices,faces=mesh.faces,visual=mesh.visual)
+        self.visual.face_colors = face_color
         self.material = material
 
 class Camera:
@@ -490,7 +485,7 @@ class BVH:
 @ti.data_oriented
 class Scene:
     def __init__(self,hair_json_path,meshes,furnace_test=False,camera = Camera(pos=vec3(0,11.5,-30),target=(0,11.5,0))):
-        self.furnace,self.maxdepth = furnace_test,51 if not furnace_test else 100
+        self.furnace,self.maxdepth = furnace_test, 100
         self.env_Le = vec3(0.5) if furnace_test else vec3(0)
         self.img = ti.Vector.field(3,ti.f64,(WIDTH,HEIGHT))
         self.camera = camera
@@ -509,6 +504,7 @@ class Scene:
                 self.faces[foffset + fi] = f + voffset
                 self.face_normals[foffset + fi] = m.face_normals[fi]
                 self.face_materials[foffset + fi] = m.material
+                self.face_materials[foffset + fi].albedo = m.visual.face_colors[fi]/255.0
             voffset += len(m.vertices)
             foffset += len(m.faces)
         # init bezier curves
@@ -520,11 +516,11 @@ class Scene:
                 hair_data.extend(curve['points'])
                 hair_data.extend(curve['width'])
         self.hair = Bezier.field(shape = self.cn)
-        # TODO:舍去截断
-        self.cn = 500000
+        self.cn = 500000 # TODO:舍去截断
         self.boxmins,self.boxmaxs = ti.Vector.field(3,ti.f64,self.cn+self.fn),ti.Vector.field(3,ti.f64,self.cn+self.fn)
         self.Init(np.array(hair_data,dtype=np.float64).reshape(-1,14))  # 3*4+2  (4 control points + width at start and end )
         self.bvh = BVH((self.boxmins.to_numpy(),self.boxmaxs.to_numpy()))
+        self.hair_material = Material(albedo=vec3(inf,0,0),Le=vec3(0),mdm = MdmNone,type=BxDF.Type.Hair) # only type will be used
 
     # initialize hair and curve/triangle bounding box
     @ti.kernel
@@ -587,13 +583,6 @@ class Scene:
                 sample = BxDF.Sample(ix)
                 beta *= sample.value*ti.abs(sample.ray.d.dot(ix.normal))/sample.pdf
                 ray = sample.ray
-                # if ix.mat.type==BxDF.Type.Lambertian:L = ix.mat.albedo
-                # elif ix.mat.type==BxDF.Type.Hair:L = (ix.bitangent)
-                # break
-                # if not ix.Valid() :
-                #     L += beta*self.env_Le
-                #     break
-                # L = ix.normal *0.5+0.5
             self.img[i,j] = L
 
 class Film:
@@ -614,4 +603,5 @@ class Film:
 
 Film(Scene('./assets/hair/straight-hair.json',[
         Mesh('./assets/hair/box.obj',Utils.DiffuseLike(0.9,0.9,0.9)),
-        Mesh('./assets/hair/light.obj',Utils.DiffuseLike(0.9,0.9,0.9,50,50,50))])).Show()
+        Mesh('./assets/hair/light2.obj',Utils.DiffuseLike(0.9,0.9,0.9,5,5,5)),
+        Mesh('./assets/hair/light.obj',Utils.DiffuseLike(0.9,0.9,0.9,10,10,10))])).Show()

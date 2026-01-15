@@ -8,6 +8,9 @@ from math import pi
 
 ti.init(arch=ti.cpu)
 eta=1.55
+nan,inf,pi = tm.nan,tm.inf,tm.pi
+vec2,vec3,vec4     = ti.types.vector(2,ti.f64),ti.types.vector(3,ti.f64),ti.types.vector(4,ti.f64)
+inf3,nan3,INone = vec3(inf),vec3(nan),-1
 
 @ti.data_oriented
 class M:
@@ -160,4 +163,109 @@ class ModifiedIORChecker:
             phi,theta = np.random.rand()*np.pi,(np.random.rand()-0.5)*np.pi
             ModifiedIORChecker.Verify(phi,theta)
 
-ModifiedIORChecker.RunRandomTests(10)
+# ModifiedIORChecker.RunRandomTests(10)
+
+BEZIER_STACK_N = 11
+@ti.dataclass
+class BezierStack:                                   # 0   1   2  ...  9    10  11  12 13 14
+    stack:ti.types.vector(15*BEZIER_STACK_N,ti.f64)  # p0x p0y p0z ... p3x p3y p3z  u0 u1 depth   // u0,u1是 p0,p3处的(在深度为0的那个bezier的)参数坐标
+    n:ti.i32
+    @ti.func
+    def Push(self,p0,p1,p2,p3,u,depth):
+        stride = 15
+        for j in range(3):
+            self.stack[self.n*stride+3*0+j] = p0[j]
+            self.stack[self.n*stride+3*1+j] = p1[j]
+            self.stack[self.n*stride+3*2+j] = p2[j]
+            self.stack[self.n*stride+3*3+j] = p3[j]
+        self.stack[self.n*stride+12] = u[0]
+        self.stack[self.n*stride+13] = u[1]
+        self.stack[self.n*stride+stride-1] = ti.cast(depth,ti.f64)
+        self.n+=1
+        if self.n>BEZIER_STACK_N:print('ERROR: bezier stack too big :',self.n)
+    @ti.func
+    def Pop(self):
+        stride = 15
+        self.n-=1
+        if self.n<0:print('ERROR: bezier stack can not pop')
+        p0,p1,p2,p3,u,depth = nan3,nan3,nan3,nan3,vec2(self.stack[self.n*stride+12],self.stack[self.n*stride+13]),ti.cast(self.stack[self.n*stride+stride-1],ti.i32)
+        for j in range(3):
+            p0[j]=self.stack[self.n*stride+3*0+j]
+            p1[j]=self.stack[self.n*stride+3*1+j]
+            p2[j]=self.stack[self.n*stride+3*2+j]
+            p3[j]=self.stack[self.n*stride+3*3+j]
+        return p0,p1,p2,p3,u,depth
+@ti.dataclass
+class Bezier:
+    p0:vec3
+    p1:vec3
+    p2:vec3
+    p3:vec3
+    w:vec2
+    bmin:vec3
+    bmax:vec3
+    sub_n:ti.i32  # 细分深度，最大深度时，认为bezier≈直线。 0表示不用细分，已是直线
+    @ti.func
+    def At(self,t:ti.f64):return (1-t)**3*self.p0+3*(1-t)**2*t*self.p1+3*(1-t)*t**2*self.p2+t**3*self.p3
+    @ti.func
+    def TangentAt(self,t:ti.f64):return 3*(1-t)**2*(self.p1-self.p0)+6*(1-t)*t*(self.p2-self.p1)+3*t**2*(self.p3-self.p2)
+    @ti.func
+    def Init(self):
+        L0,self.sub_n = 0.0,0
+        for j in ti.static(range(3)):
+            L0 = ti.max(L0, ti.abs(self.p0[j] - 2 * self.p1[j] + self.p2[j]),ti.abs(self.p1[j] - 2 * self.p2[j] + self.p3[j]))
+        if L0 > 0:
+            eps = ti.max(self.w[0], self.w[1]) * 0.05
+            value = 1.41421356237 * 6.0 * L0 / (8.0 * eps)
+            if value > 0: self.sub_n = int(tm.clamp(tm.log2(value) / 2, 0, 10))
+        self.bmin,self.bmax = ti.min(self.p0,self.p1,self.p2,self.p3),ti.max(self.p0,self.p1,self.p2,self.p3)
+        self.bmin -= vec3(self.w.max())
+        self.bmax += vec3(self.w.max())
+        return self
+    @ti.func
+    def CoordinateSystem(self,v):
+        sign = tm.sign(v.z) if v.z!=0 else 1
+        a = -1/(sign+v.z)
+        b = v.x*v.y*a
+        return vec3(1+sign*v.x**2*a,sign*b,-sign*v.x),vec3(b,sign+v.y**2*a,-v.y)
+    @ti.func
+    def LookAt(self,pos,target,up):
+        d = (target - pos).normalized()
+        r = (up.normalized().cross(d)).normalized()
+        newup,m = d.cross(r).normalized(),tm.eye(4)
+        for i in ti.static(range(3)): m[i,3],m[i,0],m[i,1],m[i,2] = pos[i],r[i],newup[i],d[i]
+        return m.inverse()
+    @ti.func
+    def HitBy(self,o,d):
+        ret = (inf,inf) # t(of ray),u(parametric coordinate)
+        dx = d.cross(self.p3 - self.p0)
+        if dx.norm() < 1e-20: dx, _ = self.CoordinateSystem(d)
+        w2r = self.LookAt(o, o + d, dx)  #world space to ray space. NOTE that curve's space is identical to world space
+        # ray space control points
+        p0, p1, p2, p3 = (w2r @ vec4(self.p0, 1)).xyz, (w2r @ vec4(self.p1, 1)).xyz, (w2r @ vec4(self.p2, 1)).xyz, (w2r @ vec4(self.p3, 1)).xyz
+        stack,found_intersect = BezierStack(),False
+        stack.Push(p0, p1, p2, p3,vec2(0,1),0)
+        while stack.n > 0 and ret[0]==inf:
+            p0, p1, p2, p3,u, depth = stack.Pop()
+            width = vec2(tm.mix(self.w[0],self.w[1],u[0]),tm.mix(self.w[0],self.w[1],u[1]))
+            bezier = Bezier(p0=p0,p1=p1,p2=p2,p3=p3,w=width).Init()  # ray space bezier
+            if depth < self.sub_n:  # check box intersect & possibly subdivide
+                if bezier.bmin.x <= 0 <= bezier.bmax.x and bezier.bmin.y <= 0 <= bezier.bmax.y and bezier.bmax.z >= 0: # ray INTERSECT with box
+                    stack.Push(p0,0.5*(p0+p1),0.25*(p0+2*p1+p2),0.125*(p0+3*p1+3*p2+p3),vec2(u[0],u.sum()/2),depth+1)
+                    stack.Push(0.125*(p0+3*p1+3*p2+p3),0.25*(p1+2*p2+p3),0.5*(p2+p3),p3,vec2(u.sum()/2,u[1]),depth+1)
+            else:  # check curve intersect
+                if (p1.y - p0.y)*-p0.y + p0.x * (p0.x - p1.x) < 0 or (p2.y - p3.y) * -p3.y + p3.x * (p3.x - p2.x)<0:continue
+                uH = (p3.xy-p0.xy).dot(-p0.xy)/(p3.xy-p0.xy).norm_sqr()  # hitU ∈ [0,1]
+                hitpos_ray_space = bezier.At(uH)
+                if hitpos_ray_space.z<0 or hitpos_ray_space.xy.norm_sqr() > tm.mix(width[0],width[1],uH)**2 : continue
+                ret[0],ret[1] = hitpos_ray_space.z,tm.mix(u[0],u[1],uH)  # 最顶层的bezier的参数坐标
+        return ret
+@ti.kernel
+def TestBezierIntersection():
+    bezier = Bezier(p0=vec3(-1,-1,-1),
+                    p1=vec3(1,1,  -1),
+                    p2=vec3(10,10,-1),
+                    p3=vec3(10,10,20),w=vec2(1,1)).Init()
+    ix = bezier.HitBy(vec3(0,0,0),vec3(0,0,1))
+    print(ix)
+TestBezierIntersection()
