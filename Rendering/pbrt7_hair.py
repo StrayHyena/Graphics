@@ -3,7 +3,7 @@ import taichi.math as tm
 import numpy as np
 import trimesh,enum,json,time
 
-ti.init(arch=ti.gpu,default_fp  =ti.f64)#,debug=True)
+ti.init(arch=ti.cpu,default_fp  =ti.f64,debug=True)
 Array   = ti.types.vector(200,ti.i32)
 vec2,vec3,vec4     = ti.types.vector(2,ti.f64),ti.types.vector(3,ti.f64),ti.types.vector(4,ti.f64)
 vec3i   = ti.types.vector(3, ti.i32)
@@ -340,7 +340,7 @@ class BxDF:
         # sample Np ----------------------------------------------------------------------------------------------------------------
         dphi = 2 * pi * r3
         if p < PMAX: dphi = BxDF.Phi(p, gammaO, gammaT) + BxDF.SampleTrimmedLogistic(r3, hair_mat.s, -pi, pi);
-        # sample DONE , let's make wi and compute pdf -------------------------------------------
+        # sample DONE , let's make wi and compute bxdf value and pdf  -------------------------------------------
         phiI = phiO + dphi
         f,wi, pdf = vec3(0),vec3(sinTheta_i, cosTheta_i * ti.sin(phiI), cosTheta_i * ti.cos(phiI)), ti.cast(0.0, ti.f64)
         for i in ti.static(range(PMAX + 1)):
@@ -354,17 +354,14 @@ class BxDF:
         assert ix.ray.mdm.eta.sum() != 0
         N,T,n = ix.normal,ix.tangent,vec3(0,1,0)  # N: world normal, T: world tangent, n: local normal
         wo,wi,pdf,f = BxDF.ToLocal(-ix.ray.d,N,T).normalized(),vec3(0),0.,vec3(inf,0,0) # use inf RED to expose problem
-        nextRayO,nextRatD = ix.pos,vec3(0)
         if ix.mat.type==BxDF.Type.Lambertian:
             wi = BxDF.CosineSampleHemisphere()
-            pdf = wi.y/tm.pi
-            f = ix.mat.albedo/tm.pi
-            nextRayO,nextRatD = nextRayO+ix.normal*EPS,BxDF.ToWorld(wi,N,T).normalized()
+            pdf,f = wi.y/pi,ix.mat.albedo/pi
         elif ix.mat.type==BxDF.Type.Hair:
+            assert ti.abs(ti.atan2(wo[1],wo[2])-ti.asin(ix.v)-pi/2)<1e-3  # φ - γ = π/2
             f,wi,pdf = BxDF.HairSample(wo)
-            nextRatD = BxDF.ToWorld(wi,N,T).normalized()
-            nextRayO += nextRatD*EPS
-        return Sample(pdf=pdf,  ray=Ray(o=nextRayO,d=nextRatD,mdm=Air), value=f)
+        wi = BxDF.ToWorld(wi,N,T).normalized()
+        return Sample(pdf=pdf,  ray=Ray(o=ix.pos+wi*EPS,d=wi,mdm=Air), value=f)
 
 class Utils:
     @staticmethod
@@ -485,7 +482,7 @@ class BVH:
 @ti.data_oriented
 class Scene:
     def __init__(self,hair_json_path,meshes,furnace_test=False,camera = Camera(pos=vec3(0,11.5,-30),target=(0,11.5,0))):
-        self.furnace,self.maxdepth = furnace_test, 100
+        self.furnace,self.maxdepth = furnace_test, 51
         self.env_Le = vec3(0.5) if furnace_test else vec3(0)
         self.img = ti.Vector.field(3,ti.f64,(WIDTH,HEIGHT))
         self.camera = camera
@@ -600,6 +597,7 @@ class Film:
             frame += 1
             canvas.set_image(self.img.to_numpy().astype(np.float32) / frame)
             window.show()
+            print('frame -------------------- ',frame)
 
 Film(Scene('./assets/hair/straight-hair.json',[
         Mesh('./assets/hair/box.obj',Utils.DiffuseLike(0.9,0.9,0.9)),
