@@ -12,7 +12,7 @@ Material = ti.types.struct(albedo=vec3,Le=vec3,mdm=Medium,type=ti.i32,ax=ti.f64,
 # 在pbrt里,sigmaa是算出来的，see SigmaAFromConcentration
 PMAX = 3
 
-nan,inf,pi = tm.nan,tm.inf,tm.pi
+nan,inf,PI = tm.nan,tm.inf,tm.pi
 WIDTH,HEIGHT = 200,200
 EPS,NOHIT = 1e-8,inf
 inf3,nan3,INone = vec3(inf),vec3(nan),-1
@@ -124,10 +124,12 @@ class Bezier:
 # NOTE: p_max is 3
 class HairMaterial:
     def __init__(self,sigma_a,eta,beta_m,beta_n,alpha):
-        self.sigma_a,self.eta,self.beta_m,self.beta_n,self.alpha = vec3(sigma_a[0],sigma_a[1],sigma_a[2]),eta,beta_m,beta_n,alpha
+        self.sigma_a,self.eta,self.beta_m,self.beta_n = vec3(sigma_a[0],sigma_a[1],sigma_a[2]),eta,beta_m,beta_n
         self.s = 0.626657069 * (0.265 * self.beta_n + 1.194 * self.beta_n**2 +5.372 * self.beta_n**22)
         v0 = (0.726 * self.beta_m + 0.812*self.beta_m**2 + 3.7 *self.beta_m**20)**2
         self.v = vec4(v0,0.25*v0,4*v0,4*v0)
+        self.sinKalpha,self.cosKalpha = vec4(0,np.sin(alpha),np.sin(2*alpha),np.sin(4*alpha)),vec4(1,np.cos(alpha),np.cos(2*alpha),np.cos(4*alpha)) 
+
 # a default hair material
 hair_mat = HairMaterial((0.06,0.1,0.2),1.55,0.25,0.3,2)
 
@@ -228,13 +230,20 @@ class BxDF:
         return vec3(v.dot(tangent),v.dot(normal),v.dot(binormal))
     @ti.func
     def CosineSampleHemisphere():
-        phi, cos_theta = 2 * tm.pi * ti.random(), ti.sqrt(ti.random())
+        phi, cos_theta = 2 * PI * ti.random(), ti.sqrt(ti.random())
         sin_theta = ti.sqrt(1 - cos_theta ** 2)
         return vec3(sin_theta * ti.sin(phi), cos_theta, sin_theta * ti.cos(phi))
 
     # TODO 考虑头发鳞片的alpha角度
     # ========================================= HAIR BXDF ================================================
     # ----------------------------------- Mp -----------------------------------
+    @ti.func   # return (cosθ'，sinθ') where θ' is θ modified by hair scale   p==0 +2α; p==1 -α; p==2 -4α; other 0; 
+    def ThetaRotateByScale(p,sinTheta,cosTheta):
+        ret = vec2(sinTheta,cosTheta)
+        if p==0:ret = vec2(sinTheta*hair_mat.cosKalpha[2]-cosTheta*hair_mat.sinKalpha[2],cosTheta*hair_mat.cosKalpha[2]+sinTheta*hair_mat.sinKalpha[2])
+        if p==1:ret = vec2(sinTheta*hair_mat.cosKalpha[1]+cosTheta*hair_mat.sinKalpha[1],cosTheta*hair_mat.cosKalpha[1]-sinTheta*hair_mat.sinKalpha[1])
+        if p==2:ret = vec2(sinTheta*hair_mat.cosKalpha[3]+cosTheta*hair_mat.sinKalpha[3],cosTheta*hair_mat.cosKalpha[3]-sinTheta*hair_mat.sinKalpha[3])
+        return (ret[0],ti.abs(ret[1]))
     @ti.func
     def v(p): return hair_mat.v[0] if p==0 else (hair_mat.v[1] if p==1 else hair_mat.v[2] if p==2 else hair_mat.v[3])
     @ti.func
@@ -251,7 +260,7 @@ class BxDF:
     @ti.func
     def LogI0(x):
         ret = ti.cast(ti.log(BxDF.I0(x)), ti.f64)
-        if x > 12: ret = x + 0.5 * (ti.log(1 / x) + 1 / (8 * x) - ti.log(2 * pi))
+        if x > 12: ret = x + 0.5 * (ti.log(1 / x) + 1 / (8 * x) - ti.log(2 * PI))
         return ret
     @ti.func
     def Mp(p, cos_theta_i, sin_theta_i, cos_theta_o, sin_theta_o):
@@ -266,14 +275,14 @@ class BxDF:
     @ti.func
     def TrimmedLogistic(x, s, a, b):return BxDF.Logisitic(x, s) / (BxDF.LogisticCDF(b, s) - BxDF.LogisticCDF(a, s))
     @ti.func
-    def Phi(p, gamma_o, gamma_t):return 2 * p * gamma_t - 2 * gamma_o + p * pi
+    def Phi(p, gamma_o, gamma_t):return 2 * p * gamma_t - 2 * gamma_o + p * PI
     # expect phi is φi-φo
     @ti.func
     def Np(p, phi, gamma_o, gamma_t):
         dphi = phi - BxDF.Phi(p, gamma_o, gamma_t)
-        while dphi > pi: dphi -= 2 * pi
-        while dphi < -pi: dphi += 2 * pi
-        return BxDF.TrimmedLogistic(dphi, hair_mat.s, -pi, pi)
+        while dphi > PI: dphi -= 2 * PI
+        while dphi < -PI: dphi += 2 * PI
+        return BxDF.TrimmedLogistic(dphi, hair_mat.s, -PI, PI)
     # ----------------------------------- Ap -----------------------------------
     @ti.func
     def Fresnel(etai, etat, cos_theta_i):
@@ -295,7 +304,7 @@ class BxDF:
         cto, cti = ti.sqrt(1 - sto ** 2), ti.sqrt(1 - sti ** 2)  # cos(θo) cos(θi)
         phiO, phiI = ti.atan2(wo[1], wo[2]), ti.atan2(wi[1], wi[2])
         spo, spi, cpo, cpi = ti.sin(phiO), ti.sin(phiI), ti.cos(phiO), ti.cos(phiI)  # sin(φo) sin(φi) cos(φo) cos(φi)
-        gammaO = phiO - pi / 2  # see hair asset's image file for illustration
+        gammaO = phiO - PI / 2  # see hair asset's image file for illustration
         sgo, eta_prime = ti.sin(gammaO), ti.sqrt((hair_mat.eta ** 2 - sto ** 2)) / cto
         stt, sgt = sto / hair_mat.eta, sgo / eta_prime  # sin(θt) sin(γt)
         ctt, cgt, gammaT = ti.sqrt(1 - stt ** 2), ti.sqrt(1 - sgt ** 2), ti.asin(sgt)  # cos(θt) cos(γt)  看pbrt的配图分析，γt应该总是和γo符号相同的
@@ -303,7 +312,9 @@ class BxDF:
         Ap = BxDF.A(cto, ti.exp(-hair_mat.sigma_a * 2 * cgt / ctt))
         ret = vec3(0)
         for i in ti.static(range(PMAX + 1)):
-            ret += Ap[i] * BxDF.Mp(i, cti, sti, cto, sto) * (0.5 / pi if i == PMAX else BxDF.Np(i, phiI - phiO, gammaO, gammaT))
+            sto_p,cto_p = BxDF.ThetaRotateByScale(i,sto,cto)
+            ret += Ap[i] * BxDF.Mp(i, cti, sti, cto_p, sto_p) * (0.5 / PI if i == PMAX else BxDF.Np(i, phiI - phiO, gammaO, gammaT))
+        if cti!=0.0: f/=cti
         return ret
     # ---------------------------------- Sampling & PDF ----------------------------
     # 公式9.49上面有一句话，quote “The design goals of the model implemented here were that it be normalized (ensuring both energy conservation and no energy loss) and that it could be sampled directly.”
@@ -320,7 +331,7 @@ class BxDF:
     def HairSample(wo):
         r0, r1, r2, r3 = ti.random(), ti.random(), ti.random(), ti.random()
         sto, phiO = wo[0], ti.atan2(wo[1], wo[2])
-        cto, gammaO = ti.sqrt(1 - sto ** 2), phiO - pi / 2
+        cto, gammaO = ti.sqrt(1 - sto ** 2), phiO - PI / 2
         sgo, eta_prime = ti.sin(gammaO), ti.sqrt((hair_mat.eta ** 2 - sto ** 2)) / cto
         stt, sgt = sto / hair_mat.eta, sgo / eta_prime  # sin(θt) sin(γt)
         ctt, cgt, gammaT = ti.sqrt(1 - stt ** 2), ti.sqrt(1 - sgt ** 2), ti.asin(sgt)
@@ -333,20 +344,23 @@ class BxDF:
         elif ApCDF[1] <= r0 < ApCDF[2]: p, v = 2, hair_mat.v[2]
         elif r0>=ApCDF[2]:              p, v = 3, hair_mat.v[3]
         # sample Mp ----------------------------------------------------------------------------------------------------------------
+        sto_p,cto_p = BxDF.ThetaRotateByScale(p,sto,cto)
         cosTheta = 1 + v * ti.log(ti.max(r1, 1e-5) + (1 - r1) * ti.exp(-2 / v))
-        sinTheta, cosPhi = ti.sqrt(1 - cosTheta ** 2), ti.cos(2 * pi * r2)
-        sinTheta_i = -cosTheta * sto + sinTheta * cosPhi * cto
+        sinTheta, cosPhi = ti.sqrt(1 - cosTheta ** 2), ti.cos(2 * PI * r2)
+        sinTheta_i = -cosTheta * sto_p + sinTheta * cosPhi * cto_p
         cosTheta_i = ti.sqrt(1 - sinTheta_i ** 2)
         # sample Np ----------------------------------------------------------------------------------------------------------------
-        dphi = 2 * pi * r3
-        if p < PMAX: dphi = BxDF.Phi(p, gammaO, gammaT) + BxDF.SampleTrimmedLogistic(r3, hair_mat.s, -pi, pi);
+        dphi = 2 * PI * r3
+        if p < PMAX: dphi = BxDF.Phi(p, gammaO, gammaT) + BxDF.SampleTrimmedLogistic(r3, hair_mat.s, -PI, PI);
         # sample DONE , let's make wi and compute bxdf value and pdf  -------------------------------------------
         phiI = phiO + dphi
         f,wi, pdf = vec3(0),vec3(sinTheta_i, cosTheta_i * ti.sin(phiI), cosTheta_i * ti.cos(phiI)), ti.cast(0.0, ti.f64)
         for i in ti.static(range(PMAX + 1)):
-            mp,np = BxDF.Mp(i, cosTheta_i, sinTheta_i, cto, sto),(0.5 / pi if i == PMAX else BxDF.Np(i, dphi, gammaO, gammaT))
+            sto_p,cto_p = BxDF.ThetaRotateByScale(i,sto,cto)
+            mp,np = BxDF.Mp(i, cosTheta_i, sinTheta_i, cto_p, sto_p),(0.5 / PI if i == PMAX else BxDF.Np(i, dphi, gammaO, gammaT))
             pdf += Ap_[i] * mp  * np
             f += Ap[i] * mp * np
+        if cosTheta_i!=0.0: f/=cosTheta_i
         return (f,wi,pdf)
 
     @ti.func
@@ -356,9 +370,9 @@ class BxDF:
         wo,wi,pdf,f = BxDF.ToLocal(-ix.ray.d,N,T).normalized(),vec3(0),0.,vec3(inf,0,0) # use inf RED to expose problem
         if ix.mat.type==BxDF.Type.Lambertian:
             wi = BxDF.CosineSampleHemisphere()
-            pdf,f = wi.y/pi,ix.mat.albedo/pi
+            pdf,f = wi.y/PI,ix.mat.albedo/PI
         elif ix.mat.type==BxDF.Type.Hair:
-            assert ti.abs(ti.atan2(wo[1],wo[2])-ti.asin(ix.v)-pi/2)<1e-3  # φ - γ = π/2
+            assert ti.abs(ti.atan2(wo[1],wo[2])-ti.asin(ix.v)-PI/2)<1e-3  # φ - γ = π/2
             f,wi,pdf = BxDF.HairSample(wo)
         wi = BxDF.ToWorld(wi,N,T).normalized()
         return Sample(pdf=pdf,  ray=Ray(o=ix.pos+wi*EPS,d=wi,mdm=Air), value=f)
@@ -481,9 +495,9 @@ class BVH:
 
 @ti.data_oriented
 class Scene:
-    def __init__(self,hair_json_path,meshes,furnace_test=False,camera = Camera(pos=vec3(0,11.5,-30),target=(0,11.5,0))):
-        self.furnace,self.maxdepth = furnace_test, 51
-        self.env_Le = vec3(0.5) if furnace_test else vec3(0)
+    def __init__(self,hair_json_path,meshes,camera = Camera(pos=vec3(0,11.5,-30),target=(0,11.5,0))):
+        self.maxdepth =  51
+        self.env_Le,self.intensity_Le =  vec3(135/255, 206/255, 235/255),4 #vec3(2)  
         self.img = ti.Vector.field(3,ti.f64,(WIDTH,HEIGHT))
         self.camera = camera
         # init triangle meshes
@@ -495,7 +509,6 @@ class Scene:
         self.face_materials = Material.field(shape=self.fn)
         voffset, foffset = 0, 0
         for mi, m in enumerate(meshes):
-            if self.furnace: m.material.albedo, m.material.Le = vec3(1), vec3(0)
             for vi, v in enumerate(m.vertices): self.vertices[voffset + vi] = m.vertices[vi]
             for fi, f in enumerate(m.faces):
                 self.faces[foffset + fi] = f + voffset
@@ -574,7 +587,7 @@ class Scene:
             for _ in range(self.maxdepth):
                 ix = self.HitBy(ray)
                 if not ix.Valid() :
-                    L += beta*self.env_Le
+                    L += beta*self.env_Le*(1 if _==0 else self.intensity_Le)
                     break
                 L += beta* ix.mat.Le
                 sample = BxDF.Sample(ix)
@@ -600,6 +613,7 @@ class Film:
             print('frame -------------------- ',frame)
 
 Film(Scene('./assets/hair/straight-hair.json',[
-        Mesh('./assets/hair/box.obj',Utils.DiffuseLike(0.9,0.9,0.9)),
-        Mesh('./assets/hair/light2.obj',Utils.DiffuseLike(0.9,0.9,0.9,5,5,5)),
-        Mesh('./assets/hair/light.obj',Utils.DiffuseLike(0.9,0.9,0.9,10,10,10))])).Show()
+        # Mesh('./assets/hair/box.obj',Utils.DiffuseLike(0.9,0.9,0.9)),
+        Mesh('./assets/hair/light2.obj',Utils.DiffuseLike(1,1,1,10,10,10)),
+        # Mesh('./assets/hair/light.obj',Utils.DiffuseLike(0.9,0.9,0.9,10,10,10))
+        ])).Show()
