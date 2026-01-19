@@ -234,15 +234,15 @@ class BxDF:
         sin_theta = ti.sqrt(1 - cos_theta ** 2)
         return vec3(sin_theta * ti.sin(phi), cos_theta, sin_theta * ti.cos(phi))
 
-    # TODO 考虑头发鳞片的alpha角度
     # ========================================= HAIR BXDF ================================================
     # ----------------------------------- Mp -----------------------------------
+    # AnEnergy-Conserving Hair Reflectance Model 公式14公式15之间有些。α要作用在θr(即这里的θo)上
     @ti.func   # return (cosθ'，sinθ') where θ' is θ modified by hair scale   p==0 +2α; p==1 -α; p==2 -4α; other 0; 
     def ThetaRotateByScale(p,sinTheta,cosTheta):
         ret = vec2(sinTheta,cosTheta)
-        if p==0:ret = vec2(sinTheta*hair_mat.cosKalpha[2]-cosTheta*hair_mat.sinKalpha[2],cosTheta*hair_mat.cosKalpha[2]+sinTheta*hair_mat.sinKalpha[2])
-        if p==1:ret = vec2(sinTheta*hair_mat.cosKalpha[1]+cosTheta*hair_mat.sinKalpha[1],cosTheta*hair_mat.cosKalpha[1]-sinTheta*hair_mat.sinKalpha[1])
-        if p==2:ret = vec2(sinTheta*hair_mat.cosKalpha[3]+cosTheta*hair_mat.sinKalpha[3],cosTheta*hair_mat.cosKalpha[3]-sinTheta*hair_mat.sinKalpha[3])
+        if p==0:ret = vec2(sinTheta*hair_mat.cosKalpha[2]+cosTheta*hair_mat.sinKalpha[2],cosTheta*hair_mat.cosKalpha[2]-sinTheta*hair_mat.sinKalpha[2])
+        if p==1:ret = vec2(sinTheta*hair_mat.cosKalpha[1]-cosTheta*hair_mat.sinKalpha[1],cosTheta*hair_mat.cosKalpha[1]+sinTheta*hair_mat.sinKalpha[1])
+        if p==2:ret = vec2(sinTheta*hair_mat.cosKalpha[3]-cosTheta*hair_mat.sinKalpha[3],cosTheta*hair_mat.cosKalpha[3]+sinTheta*hair_mat.sinKalpha[3])
         return (ret[0],ti.abs(ret[1]))
     @ti.func
     def v(p): return hair_mat.v[0] if p==0 else (hair_mat.v[1] if p==1 else hair_mat.v[2] if p==2 else hair_mat.v[3])
