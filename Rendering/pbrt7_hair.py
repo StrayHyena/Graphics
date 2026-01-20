@@ -495,7 +495,7 @@ class BVH:
 
 @ti.data_oriented
 class Scene:
-    def __init__(self,hair_json_path,meshes,camera = Camera(pos=vec3(0,11.5,-30),target=(0,11.5,0))):
+    def __init__(self,hair_json_path,meshes,camera = Camera(pos=vec3(0,10,-20),target=(0,10,0))):
         self.maxdepth =  51
         self.env_Le,self.intensity_Le =  vec3(135/255, 206/255, 235/255),4 #vec3(2)  
         self.img = ti.Vector.field(3,ti.f64,(WIDTH,HEIGHT))
