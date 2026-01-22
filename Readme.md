@@ -78,9 +78,9 @@ Taichi -- 1.7.3
 |  <img src="./results/render/cornell.png" alt="show" />   | <img src="./results/render/anisotropic_microfacet_x.png" alt="show" />   | <img src="./results/render/mis.png" alt="show" />  
 
 ## volume path tracer
-| fog  | Jade Bunny | Explosion  |
-|:------:|:-----:|:-----:|
-|  <img src="./results/render/fog.png" alt="show" />   | <img src="./results/render/homogeneous_medium.png" alt="show" />   | <img src="./results/render/aerial.png" alt="show" />  
+| fog  | Jade Bunny | Explosion  |  Hair |  
+|:------:|:-----:|:-----:|:-----:|
+|  <img src="./results/render/fog.png" alt="show" />   | <img src="./results/render/homogeneous_medium.png" alt="show" />   | <img src="./results/render/aerial.png" alt="show" /> | <img src="./results/render/hair.png" alt="show" />  
 
 <font color=#288FD4  size=5 ><a href="http://www.cse.yorku.ca/~amana/research/grid.pdf" target="_blank">A Fast Voxel Traversal Algorithm for Ray Tracing</a></font>  
 | TestCase0  | TestCase1 |

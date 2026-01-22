@@ -13,7 +13,7 @@ Material = ti.types.struct(albedo=vec3,Le=vec3,mdm=Medium,type=ti.i32,ax=ti.f64,
 PMAX = 3
 
 nan,inf,PI = tm.nan,tm.inf,tm.pi
-WIDTH,HEIGHT = 200,200
+WIDTH,HEIGHT = 400,400
 EPS,NOHIT = 1e-8,inf
 inf3,nan3,INone = vec3(inf),vec3(nan),-1
 # https://refractiveindex.info/  R 630 nm ,G 532 nm ,B 465 nm
@@ -526,7 +526,7 @@ class Scene:
                 hair_data.extend(curve['points'])
                 hair_data.extend(curve['width'])
         self.hair = Bezier.field(shape = self.cn)
-        self.cn = 500000 # TODO:舍去截断
+        # self.cn = 500000 # TODO:舍去截断
         self.boxmins,self.boxmaxs = ti.Vector.field(3,ti.f64,self.cn+self.fn),ti.Vector.field(3,ti.f64,self.cn+self.fn)
         self.Init(np.array(hair_data,dtype=np.float64).reshape(-1,14))  # 3*4+2  (4 control points + width at start and end )
         self.bvh = BVH((self.boxmins.to_numpy(),self.boxmaxs.to_numpy()))
