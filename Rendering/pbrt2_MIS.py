@@ -1,7 +1,7 @@
 import taichi as ti
 import taichi.math as tm
 import numpy as np
-import trimesh,enum
+import trimesh,enum,os
 
 ti.init(arch=ti.cpu,default_fp  =ti.f64,debug=True)
 Array   = ti.types.vector( 200  ,ti.i32)
@@ -244,6 +244,8 @@ class Utils:
     def MirrorLike():return Material(Le=vec3(0),mdm = MdmNone,type=BxDF.Type.Specular)
     @ti.func
     def PowerHeuristic(pa,pb): return pa**2/(pa**2+pb**2)
+    @staticmethod
+    def Asset(file): return os.path.join(os.path.dirname(__file__),'assets',file)
 
 class Mesh(trimesh.Trimesh):
     def __init__(self,objpath,material):
@@ -553,24 +555,24 @@ class Film:
 def TestCase(name=''):
     if name=='MIS':
         return Scene([
-            Mesh('./assets/mis/light.obj',          Utils.DiffuseLike(0,0,0,800,800,800) ),
-            Mesh('./assets/mis/light0033.obj',      Utils.DiffuseLike(0,0,0,901.803 ,901.803 ,901.803) ),
-            Mesh('./assets/mis/light0300.obj',      Utils.DiffuseLike(0,0,0,11.1111 ,11.1111 ,11.1111) ),
-            Mesh('./assets/mis/light0900.obj',      Utils.DiffuseLike(0,0,0,1.23457 ,1.23457 ,1.23457) ),
-            Mesh('./assets/mis/light0100.obj',      Utils.DiffuseLike(0,0,0,100, 100, 100) ),
-            Mesh('./assets/mis/plate1.obj',    Utils.MetalLike(Gold,0.005,0.005)),
-            Mesh('./assets/mis/plate2.obj', Utils.MetalLike(Gold, 0.02, 0.02)),
-            Mesh('./assets/mis/plate3.obj', Utils.MetalLike(Gold, 0.05, 0.05)),
-            Mesh('./assets/mis/plate4.obj', Utils.MetalLike(Gold, 0.1, 0.1)),
-            Mesh('./assets/mis/floor.obj',  Utils.DiffuseLike(0.4)),
+            Mesh(Utils.Asset('mis/light.obj'),          Utils.DiffuseLike(0,0,0,800,800,800) ),
+            Mesh(Utils.Asset('mis/light0033.obj'),      Utils.DiffuseLike(0,0,0,901.803 ,901.803 ,901.803) ),
+            Mesh(Utils.Asset('mis/light0300.obj'),      Utils.DiffuseLike(0,0,0,11.1111 ,11.1111 ,11.1111) ),
+            Mesh(Utils.Asset('mis/light0900.obj'),      Utils.DiffuseLike(0,0,0,1.23457 ,1.23457 ,1.23457) ),
+            Mesh(Utils.Asset('mis/light0100.obj'),      Utils.DiffuseLike(0,0,0,100, 100, 100) ),
+            Mesh(Utils.Asset('mis/plate1.obj'),    Utils.MetalLike(Gold,0.005,0.005)),
+            Mesh(Utils.Asset('mis/plate2.obj'), Utils.MetalLike(Gold, 0.02, 0.02)),
+            Mesh(Utils.Asset('mis/plate3.obj'), Utils.MetalLike(Gold, 0.05, 0.05)),
+            Mesh(Utils.Asset('mis/plate4.obj'), Utils.MetalLike(Gold, 0.1, 0.1)),
+            Mesh(Utils.Asset('mis/floor.obj'),  Utils.DiffuseLike(0.4)),
             ],False,Camera(pos=vec3(0, 2, 15),target=(0, -2, 2.5)),11)
     else:  return Scene([
-                    Mesh('./assets/cornell/quad_top.obj', Utils.DiffuseLike(0.9, 0.9, 0.9)),
-                    Mesh('./assets/cornell/quad_bottom.obj', Utils.MetalLike(Gold, 0.001, 0.001)),
-                    Mesh('./assets/cornell/quad_left.obj', Utils.DiffuseLike(0.6, 0, 0)),
-                    Mesh('./assets/cornell/quad_right.obj', Utils.DiffuseLike(0., 0.6, 0.)),
-                    Mesh('./assets/cornell/quad_back.obj', Utils.DiffuseLike(0.9, 0.9, 0.9)),
-                    # Mesh('./asse/cornellts/sphere.obj', Utils.GlassLike(2.)),
-                    Mesh('./assets/cornell/lightSmall.obj', Utils.DiffuseLike(0.9, 0.9, 0.9, 50, 50, 50)),
+                    Mesh(Utils.Asset('cornell/quad_top.obj'), Utils.DiffuseLike(0.9, 0.9, 0.9)),
+                    Mesh(Utils.Asset('cornell/quad_bottom.obj'), Utils.MetalLike(Gold, 0.001, 0.001)),
+                    Mesh(Utils.Asset('cornell/quad_left.obj'), Utils.DiffuseLike(0.6, 0, 0)),
+                    Mesh(Utils.Asset('cornell/quad_right.obj'), Utils.DiffuseLike(0., 0.6, 0.)),
+                    Mesh(Utils.Asset('cornell/quad_back.obj'), Utils.DiffuseLike(0.9, 0.9, 0.9)),
+                    # Mesh('./asse/cornellts/sphere.obj'), Utils.GlassLike(2.)),
+                    Mesh(Utils.Asset('cornell/lightSmall.obj'), Utils.DiffuseLike(0.9, 0.9, 0.9, 50, 50, 50)),
                 ], False)
 Film(TestCase('MIS')).Show()

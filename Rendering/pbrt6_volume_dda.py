@@ -1,7 +1,7 @@
 import taichi as ti
 import taichi.math as tm
 import numpy as np
-import enum,json
+import enum,json,os
 
 ti.init(arch=ti.gpu,default_fp  =ti.f64,debug=True)
 Array   = ti.types.vector( 200  ,ti.i32)
@@ -369,5 +369,5 @@ class Film:
             canvas.set_image(self.img.to_numpy().astype(np.float32) / frame)
             window.show()
 
-Film(Volume(r".\assets\vdb\aerial.json")).Show()
+Film(Volume(os.path.join(os.path.dirname(__file__),'assets','vdb/aerial.json') )).Show()
 # Resource:  https://github.com/shadeops/pbrt-v4-volumes

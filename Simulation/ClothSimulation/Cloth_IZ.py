@@ -2,7 +2,7 @@ import numpy as np, polyscope as ps, taichi as ti
 import polyscope.imgui as psim
 import scipy.sparse as sp
 from scipy.optimize import minimize
-import trimesh,time,collections,math
+import trimesh,time,collections,math,os
 # ref1:Robust Treatment of Collisions, Contact and Friction for Cloth Animation
 # ref2:Derivation of discrete bending forces and their gradients
 # ref3:Optimized Spatial Hashing for Collision Detection of Deformable Objects
@@ -659,4 +659,4 @@ def Main(testcase,export_obj=False,stop_frame=500):
         ps.frame_tick()
         frameid += 1
 
-Main('./assets/quad01_2.obj',False,800)
+Main(os.path.join(os.path.dirname(__file__),'assets','quad01_2.obj'),False,800)

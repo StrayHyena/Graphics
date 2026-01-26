@@ -1,6 +1,8 @@
-Python -- 3.10
-Taichi -- 1.7.3  
-
+# Main Requirements
+Python(3.10)
+Taichi(1.7.4) --  for computation
+PolyScope -- for visualization
+Scipy     -- only for solving linear system
 
 # <span style="color: #6657bd;"> Numerical Methods </span>
 

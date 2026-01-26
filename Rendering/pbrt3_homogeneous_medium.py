@@ -1,7 +1,7 @@
 import taichi as ti
 import taichi.math as tm
 import numpy as np
-import trimesh,enum
+import trimesh,enum,os
 
 ti.init(arch=ti.cpu,default_fp  =ti.f64,debug=True)
 Array   = ti.types.vector( 200  ,ti.i32)
@@ -249,6 +249,8 @@ class Utils:
     def GlassLike(eta): return Material(Le=vec3(0),mdm=Medium(eta = vec3(eta)),type=BxDF.Type.Transmission)
     @staticmethod
     def MirrorLike():return Material(Le=vec3(0),mdm = MdmNone,type=BxDF.Type.Specular)
+    @staticmethod
+    def Asset(file): return os.path.join(os.path.dirname(__file__),'assets',file)
 
 class Mesh(trimesh.Trimesh):
     def __init__(self,objpath,material):
@@ -491,19 +493,19 @@ class Film:
 def TestCase(name=''):
     if name=='JadeBunny':
         return Scene([
-                    Mesh('./assets/medium/floor.obj', Utils.DiffuseLike(0.3, 0.6, 0.9)),
-                    Mesh('./assets/medium/light.obj', Utils.DiffuseLike(0.9, 0.9, 0.9, 1, 1, 1)),
-                    Mesh('./assets/medium/bunny.obj', Material(Le=vec3(0),mdm=Jade,type=BxDF.Type.Transmission)),
-                    Mesh('./assets/medium/bunny1.obj', Material(Le=vec3(0), mdm=Jade1, type=BxDF.Type.Transmission)),
+                    Mesh(Utils.Asset('medium/floor.obj'), Utils.DiffuseLike(0.3, 0.6, 0.9)),
+                    Mesh(Utils.Asset('medium/light.obj'), Utils.DiffuseLike(0.9, 0.9, 0.9, 1, 1, 1)),
+                    Mesh(Utils.Asset('medium/bunny.obj'), Material(Le=vec3(0),mdm=Jade,type=BxDF.Type.Transmission)),
+                    Mesh(Utils.Asset('medium/bunny1.obj'), Material(Le=vec3(0), mdm=Jade1, type=BxDF.Type.Transmission)),
                 ], False,Camera(pos=vec3(0, 2, 15),target=(0, -2, 2.5)))
     else: return Scene([
-                    Mesh('./assets/cornell/quad_top.obj', Utils.DiffuseLike(0.9, 0.9, 0.9)),
-                    Mesh('./assets/cornell/quad_bottom.obj', Utils.DiffuseLike(0.9)),
-                    Mesh('./assets/cornell/quad_left.obj', Utils.DiffuseLike(0.6, 0, 0)),
-                    Mesh('./assets/cornell/quad_right.obj', Utils.DiffuseLike(0., 0.6, 0.)),
-                    Mesh('./assets/cornell/quad_back.obj', Utils.DiffuseLike(0.9, 0.9, 0.9)),
-                    Mesh('./assets/cornell/sphere1.obj', Utils.GlassLike(2.)),
-                    Mesh('./assets/cornell/lightSmall.obj', Utils.DiffuseLike(0.9, 0.9, 0.9, 50, 50, 50)),
+                    Mesh(Utils.Asset('cornell/quad_top.obj'), Utils.DiffuseLike(0.9, 0.9, 0.9)),
+                    Mesh(Utils.Asset('cornell/quad_bottom.obj'), Utils.DiffuseLike(0.9)),
+                    Mesh(Utils.Asset('cornell/quad_left.obj'), Utils.DiffuseLike(0.6, 0, 0)),
+                    Mesh(Utils.Asset('cornell/quad_right.obj'), Utils.DiffuseLike(0., 0.6, 0.)),
+                    Mesh(Utils.Asset('cornell/quad_back.obj'), Utils.DiffuseLike(0.9, 0.9, 0.9)),
+                    Mesh(Utils.Asset('cornell/sphere1.obj'), Utils.GlassLike(2.)),
+                    Mesh(Utils.Asset('cornell/lightSmall.obj'), Utils.DiffuseLike(0.9, 0.9, 0.9, 50, 50, 50)),
                 ], False)
 
 Film(TestCase('JadeBunny')).Show()
