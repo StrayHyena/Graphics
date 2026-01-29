@@ -1,9 +1,9 @@
 import taichi as ti
 import taichi.math as tm
 import numpy as np
-import trimesh,enum,json,time
+import trimesh,enum,json,time,os
 
-ti.init(arch=ti.cpu,default_fp  =ti.f64,debug=True)
+ti.init(arch=ti.cpu,default_fp  =ti.f64,offline_cache=False)
 Array   = ti.types.vector(200,ti.i32)
 vec2,vec3,vec4     = ti.types.vector(2,ti.f64),ti.types.vector(3,ti.f64),ti.types.vector(4,ti.f64)
 vec3i   = ti.types.vector(3, ti.i32)
@@ -131,7 +131,7 @@ class HairMaterial:
         self.sinKalpha,self.cosKalpha = vec4(0,np.sin(alpha),np.sin(2*alpha),np.sin(4*alpha)),vec4(1,np.cos(alpha),np.cos(2*alpha),np.cos(4*alpha)) 
 
 # a default hair material
-hair_mat = HairMaterial((0.06,0.1,0.2),1.55,0.25,0.3,2)
+hair_mat = HairMaterial((0.06,0.1,0.2),1.55,0.25,0.3,np.deg2rad(2))
 
 @ti.dataclass
 class Ray:
@@ -525,6 +525,7 @@ class Scene:
             for curve in json_data['shapes']:
                 hair_data.extend(curve['points'])
                 hair_data.extend(curve['width'])
+        # self.cn = 500000
         self.hair = Bezier.field(shape = self.cn)
         # self.cn = 500000 # TODO:舍去截断
         self.boxmins,self.boxmaxs = ti.Vector.field(3,ti.f64,self.cn+self.fn),ti.Vector.field(3,ti.f64,self.cn+self.fn)
@@ -608,12 +609,13 @@ class Film:
             self.scene.Draw()
             self.img.from_numpy(self.img.to_numpy()+self.scene.img.to_numpy())
             frame += 1
+            if frame%10==1: ti.tools.imwrite(self.img.to_numpy()/ frame,'hair.png')
             canvas.set_image(self.img.to_numpy().astype(np.float32) / frame)
             window.show()
             print('frame -------------------- ',frame)
 
-Film(Scene('./assets/hair/straight-hair.json',[
+Film(Scene(os.path.join(os.path.dirname(__file__),'assets/hair/straight-hair.json'),[
         # Mesh('./assets/hair/box.obj',Utils.DiffuseLike(0.9,0.9,0.9)),
-        Mesh('./assets/hair/light2.obj',Utils.DiffuseLike(1,1,1,10,10,10)),
+        Mesh(os.path.join(os.path.dirname(__file__),'assets/hair/light2.obj'),Utils.DiffuseLike(1,1,1,10,10,10)),
         # Mesh('./assets/hair/light.obj',Utils.DiffuseLike(0.9,0.9,0.9,10,10,10))
         ])).Show()
