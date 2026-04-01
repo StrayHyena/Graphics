@@ -41,14 +41,14 @@ class Visualizer:
     def ShowAnimation(self):
         ps.set_enable_vsync(True)
         ps.set_max_fps(int(1/self.skeleton.dt))
-        while not io.KeyCtrl:
+        while not psim.IsKeyDown(psim.ImGuiKey_Escape):
             for fi in range(self.skeleton.frame_cnt):
                 self.ps_segs.update_node_positions(self.segs[fi])
                 ps.frame_tick()
     # only control frame 0
     def RigControl(self):
         rotations,positions,root_pos = copy.deepcopy(self.skeleton.rotations[0]),self.skeleton.positions[0].copy(),self.skeleton.root_pos[0]
-        while not io.KeyCtrl:
+        while not psim.IsKeyDownDown(psim.ImGuiKey_Escape):
             jidx,translate = self.dragger.DragJoint()
             if jidx is not None: 
                 temp_positions = self.skeleton.FK(self.skeleton.IK(jidx,positions[jidx]+translate,rotations,root_pos),root_pos)[0]

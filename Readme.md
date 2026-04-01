@@ -2,7 +2,7 @@
 Python(3.10)  
 Taichi(1.7.4)       --  for computation  
 PolyScope(2.4.0)    -- for visualization  
-Scipy(1.8.1 )       -- only for solving linear system  
+Scipy(1.15.3)       -- only for solving linear system  
 
 # <span style="color: #6657bd;"> Numerical Methods </span>
 
@@ -126,6 +126,6 @@ Scipy(1.8.1 )       -- only for solving linear system
 |  <img src="./results/MVC.png" alt="show" />   | <img src="./results/DeformationTransfer.png" alt="show" />   |  |
 
 
-# <span style="color: #6657bd;"> <br><br><br><br>Charactor Animation </span>
+# <span style="color: #6657bd;"> <br><br><br><br>Character Animation </span>
 ## Inverse Kinematics
  <img src="./results/IK.gif" alt="show" /> 
