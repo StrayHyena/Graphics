@@ -650,7 +650,7 @@ def Main(testcase,export_obj=False,stop_frame=500):
     ps_mesh.set_back_face_policy('custom')
     ps_mesh.set_edge_width(1.0)
     io,frameid = psim.GetIO(),0
-    while not io.KeyCtrl and frameid<stop_frame:
+    while not psim.IsKeyDown(psim.ImGuiKey_Escape) and frameid<stop_frame:
         print('\nFRAME ',frameid,'------------------------')
         ps_mesh.update_vertex_positions(simulator.Run().x.to_numpy())
         if export_obj:
