@@ -16,8 +16,6 @@ torch.backends.cudnn.benchmark = False
 log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),'logs',os.path.splitext(os.path.basename(__file__))[0])  # ./logs/filename/
 logger = SummaryWriter(log_path)
 model_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)),'models',os.path.splitext(os.path.basename(__file__))[0]) # ./models/filename/
-shutil.rmtree(log_path, ignore_errors=True) 
-os.makedirs(log_path, exist_ok=True)
 if not os.path.exists(model_dir): os.makedirs(model_dir)
 dataset_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),'datasets') # ./datasets
 batch_size = 64
@@ -69,23 +67,28 @@ class Transformer(nn.Module):
                 nn.Linear(dh,dm),
             )
             self.ln_ff = nn.LayerNorm(dm)
-        def forward(self,x): # x : after positional encoding, shape (T,dm)
+        def forward(self,x): # output  shape: (T,dm);|  input(embedding(after positional encoding)) shape: (T,dm); 
             y = self.ln_mha(x+self.mha(x))
-            return self.ln_ff(y + self.ff(y))
+            return self.ln_ff(y + self.ff(y))  
     
     # an encoder only transformer  
-    def __init__(self,T,dm,h,dh=-1,encoder_num=6,pe=True,name=''):
+    def __init__(self,T,dm,h,d_out,dh=-1,encoder_num=6,pe=True,name=''):
         super().__init__()
         self.T,self.pe = T,Transformer.PositionalEncoding(T,dm) if pe else None
         self.encoders = nn.Sequential(*(Transformer.Encoder(dm,h,dh)for _ in range(encoder_num)))
-        self.name=type(self).__name__+name+('_with'if self.pe is not None else '_without')+'_pe'
-        # after encoders, shape is (T,dm)            
-    def forward(self,x):return self.encoders(self.pe(x)if self.pe is not None else x)
+        self.name=type(self).__name__+name+('_without'if self.pe is None else '_with')+'_pe'
+        self.out_net = nn.Sequential(
+            nn.LayerNorm(dm),
+            nn.ReLU(),
+            nn.Linear(dm,d_out),
+        )
+    def forward(self,x):return self.out_net(self.encoders(self.pe(x)if self.pe is not None else x))  # output shape: (T,d_out)
     @property
     def save_path(self):return os.path.join(model_dir,self.name)
 
 # @EXPERIMENT0 这个测试里，我们的任务是把一个长度是T的有序整数[0,128)序列s,进行反转(e.g.(2,3,6,7,1) --> (1,7,6,3,2))
 # 首先，考虑数字的embedding: 这里可以直接用 one-hot编码。而transformer的输出是T个logits
+# 这里的label还是T个数字,使用CrossEntropyLoss可以直接和T个logits做loss。而在Eval里,这T个logits返算出的tag必须和label里的数字一一对应
 class SequenceReverse:
     name = __qualname__
     class DataSet(data.Dataset):
@@ -99,7 +102,7 @@ class SequenceReverse:
         T,dm = 10,128
         train_set,val_set,test_set = SequenceReverse.DataSet(T,dm),SequenceReverse.DataSet(T,dm,n=1000),SequenceReverse.DataSet(T,dm,n=10000),
         train_loader,val_loader,test_loader = data.DataLoader(train_set,batch_size,drop_last=True),data.DataLoader(train_set,batch_size),data.DataLoader(train_set,batch_size)
-        model = Transformer(T,dm,1,name=SequenceReverse.name)     
+        model = Transformer(T,dm,1,train_set.numclass,name=SequenceReverse.name,pe=True)     
         if not os.path.exists(model.save_path): Train(model,train_loader,val_loader)
         model.load_state_dict(torch.load(model.save_path),strict=True)
         print(model.name + ' test acc is ',Eval(model,test_loader))
@@ -108,7 +111,9 @@ class SequenceReverse:
         print('Inference Test\n x:',test_x,'\n y:',test_y.squeeze().argmax(dim=-1))
 
 # @EXPERIMENT1 这个测试里，我们的任务是从一个长度是T的图片集合中找出类别不同的那一张。e.g.(0:猫,1:狗,2:猫,3:猫,4:猫,) --> 1
-#首先，需要对每个图片都做embedding，这里我们使用提前预训练好的模型(i.e. ResNet34),ResNet34最后的fc会把维度从512-->1000，这里我们把fc换成identity,得到512维的embedding
+#首先，需要对每个图片都做embedding，这里我们使用提前预训练好的模型(i.e. ResNet34),ResNet34最后的fc会把维度从512-->1000，这里我们把fc换成identity,得到512维的embedding。
+# Transformer输出的是T个1维tensor。所以Train里有squeeze(dim=-1)
+# 这里的label是1个数字(即,num class,范围是0-T),使用CrossEntropyLoss可以直接和已经squeeze的size==T的tensor做loss。
 class SetAnormalyDetection:
     name = __qualname__
     class DataSet(data.Dataset):
@@ -140,7 +145,7 @@ class SetAnormalyDetection:
                     seqimgs[anorm_idx] = label2embeddings[anorm_label][anorm_img_idx] # 从anorm里选1张
                     datas.append(seqimgs)
                     labels.append(anorm_idx)
-                torch.save({'datas':torch.stack(datas),'labels':F.one_hot(torch.tensor(labels),T)},file_path)
+                torch.save({'datas':torch.stack(datas),'labels':torch.tensor(labels)},file_path)
             loaded = torch.load(file_path)
             self.datas,self.labels = loaded['datas'],loaded['labels']
             self.dm = self.datas.shape[-1]
@@ -153,23 +158,25 @@ class SetAnormalyDetection:
         train_val_set,test_set = SetAnormalyDetection.DataSet(T),SetAnormalyDetection.DataSet(T,False)
         train_set,val_set = torch.utils.data.random_split(train_val_set,[45000,5000])
         train_loader,val_loader,test_loader = data.DataLoader(train_set,batch_size,True,drop_last=True),data.DataLoader(val_set,batch_size,True,drop_last=False),data.DataLoader(test_set,batch_size,True,drop_last=False)
-        model = Transformer(T,test_set.dm,1,pe=False,name = SetAnormalyDetection.name)
-        if not os.path.exists(model.save_path):Train(model,train_loader,val_loader)
+        model = Transformer(T,test_set.dm,8,1,pe=False,name = SetAnormalyDetection.name)
+        if not os.path.exists(model.save_path):Train(model,train_loader,val_loader,num_epochs=20)
         model.load_state_dict(torch.load(model.save_path),strict=True)
-        Test(model,test_loader)
+        print(model.name + ' test acc is ',Eval(model,test_loader))
 
 @torch.no_grad()
 def Eval(model,dataloader):
-    model,correct=model.to(device),0
+    model,correct,num = model.to(device),0,0
     model.eval()
     for seqs,labels in dataloader:
         seqs,labels = seqs.to(device),labels.to(device)
-        predict = model(seqs) # (B, T, number class)
-        correct += (predict.argmax(dim=-1)==labels).sum().item() 
-    # NOTE: len(dataloader) is the number of batches!!!
-    return correct/len(dataloader.dataset)/model.T
+        predict = model(seqs) # (B, T, number class) for SeqReverse ,  (B,T,1) for SetAnormal
+        correct += (predict.squeeze(dim=-1).argmax(dim=-1)==labels).sum().item()
+        num += labels.size(0) * (predict.shape[1] if SequenceReverse.name in model.name else 1)  # batch size * number classes 
+    return correct/num
 
 def Train(model,train_loader,val_loader,criterion=nn.CrossEntropyLoss(),num_epochs=10):
+    shutil.rmtree(log_path, ignore_errors=True) 
+    os.makedirs(log_path, exist_ok=True)
     optimizer = optim.AdamW(model.parameters(),weight_decay=1e-4)
     scheduler = CosineWarmupScheduler(optimizer,50,num_epochs*len(train_loader))
     model,best_val_acc = model.to(device),0.0
@@ -177,9 +184,11 @@ def Train(model,train_loader,val_loader,criterion=nn.CrossEntropyLoss(),num_epoc
         epoch_loss = 0.0
         model.train()
         for batch_idx,(seqs,labels) in enumerate(train_loader):
-            # 注意,model的输出是 (B,T,dm)最后一维是class维度，但是CrossEntropyLoss要求，input的Class维度在第二位
-            y = model(seqs.to(device))
-            loss = criterion(model(seqs.to(device)).transpose(-1,-2),labels.to(device))
+            y_hat = model(seqs.to(device)).squeeze(dim=-1)
+            # 如果 y_hat shape是(B,T,num_class)最后一维是class维度，但是CrossEntropyLoss要求，input的Class维度在dim=1(第二位)
+            # 如果 y_hat shape是(B,num_class) 就无需transpose
+            if len(y_hat.shape)==3: y_hat = y_hat.transpose(-1,-2)
+            loss = criterion(y_hat,labels.to(device))
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
@@ -193,5 +202,5 @@ def Train(model,train_loader,val_loader,criterion=nn.CrossEntropyLoss(),num_epoc
             torch.save(model.state_dict(),model.save_path)
 
 def Main():
-    for TestType in [SetAnormalyDetection,SequenceReverse,]: TestType().Test()
+    for TestType in [ SetAnormalyDetection,    SequenceReverse,]: TestType().Test()
 if __name__ == '__main__': Main()
