@@ -2,3 +2,17 @@
 pythonProject/
 **/RealTimeRendering/
 *.ini
+/DeepLearning/**/models
+/DeepLearning/**/logs
+*.obj
+*.hip
+*.json
+*.vdb
+*.nvdb
+*.nb
+*.bgeo
+*.sc
+*.png
+*.zip
+*.pth
+/CharacterAnimation/misc/
