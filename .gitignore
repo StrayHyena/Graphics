@@ -4,6 +4,7 @@ pythonProject/
 *.ini
 /DeepLearning/**/models
 /DeepLearning/**/logs
+/DeepLearning/**/datasets
 *.obj
 *.hip
 *.json
