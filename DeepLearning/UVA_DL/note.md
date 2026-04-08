@@ -54,6 +54,7 @@ $$
 torch                   2.5.1+cu121  
 torchvision             0.20.1+cu121   
 matplotlib              3.10.8  
+CUDA(on my machine)     12.9
 
 > 本节的目标是实现一个xor的分类器   
 为了使数据更复杂一些,这里的xor的data不只是(0,0) (0,1) (1,0) (1,1)这四个点,是以(0,0) (0,1) (1,0) (1,1)这四个点为中心,radius为半径随机的生成一些点  
@@ -65,7 +66,7 @@ matplotlib              3.10.8
 5. **epoch**     表示把数据集完整的过一边。 
 ## Pytorch Tensor
 - b==7, 是把index为7的位置都置为1。生成如[False,True,False,False,True]的tensor
-- a[mask], mask is like[False,True,False,False,True]。它的作用是取a的第2个和第5个元素。
+- a[mask], mask is like[False,True,False,False,True]。它的作用是取a的第2个和第5个元素(结果的size是2)。
 - a[idx], idx is like[1,4]。同上
 - 注意 a[[0,1,0,0,1]]和上式不等价！
 # **2** Miscellaneous Topics
@@ -128,7 +129,8 @@ $$Google Net$$
 而res net:$ y = F(x) + x $  
 其中，F(x)可以是一系列的conv maxpool avg relu等等     
 所以,res net要求 x的shape(C,H,W)和F(x)的是相同的  
-如果Shape不同，则 x可以过一个1x1 Conv再与F(x)相加(尺寸不同就调整stride)。此时，$ y = F(x) + W_sx $
+如果Shape不同，则 x可以过一个1x1 Conv再与F(x)相加(尺寸不同就调整stride)。此时，$ y = F(x) + W_sx $  
+_上述的线性层应该尽量避免，只在迫不得已的情况下才加_
 $$ResNet Block$$
 ![](pics/resnetblock.png)  
 注:图中的|weight|表示Linear层  
@@ -171,7 +173,7 @@ Output $ (n \times d_v) \quad Output_i(第i行)= \sum_{j=1}^{n} A_{ij} \cdot x_j
 |![](./pics/attention.png)|![](./pics/multihead_attention.png)|
 
 对于多头注意力,设待学习的QKV矩阵有h组,每一组的输出维度是$d_v$,h组拼接在一起就是$hd_v$。  
-为了和输入维度$d_m$一致，要求要么$hd_v=d_m$;要么最后加一个Linear层(如右图最上面的Linear层)来对齐输入维度
+为了和输入维度$d_m$一致，需要最后加一个Linear层(如右图最上面的Linear层，即使$hd_v=d_m$)来对齐输入维度
 ## Scale
 这里来讲讲为啥有$\sqrt{d_m}$的缩放。  
 已知，对于独立分布的变量X,Y。有$D(XY) = D(X)D(Y) + D(X)[E(Y)]^2 + D(Y)[E(X)]^2$  
@@ -201,3 +203,27 @@ decay: iteration M->N  ==> learning rate:优化器的设定值-->一个很小的
 $warmup_{factor}=\frac{i}{M}$  
 $decay_{factor} = 0.5*(1+cos(\frac{\pi i}{N}))$  
 注意，iteration的单位是batch iteration(而不是epoch)  
+# **5** GNN
+> 图信息(edge index/dense/sparse joint matrix)一般在forward里给  
+数据集里的train_mask表示整个图里被训练的node.如果它的邻居不在train mask里,这个邻居也会被更新feature vector,只不过在最终计算loss时只使用train nodes.
+## [GAT](https://arxiv.org/pdf/1710.10903)  
+Nodes           $\quad\quad\quad\quad(v_1,v_2,...,v_n)$  
+Feature Vectors  $\quad(\mathbf{x_1},\mathbf{x_2},...,\mathbf{x_n}) \quad \mathbf{x} \in \mathbb{R}^F $  
+learnable parameters $ \mathbf{W}_{F^{'}\times F} \quad  \mathbf{a}_{2F^{'}}$  
+$$
+\alpha_{ij} = \frac{
+e^{\sigma(\mathbf{a}^T \,[\mathbf{Wx_i}\,\|\, \mathbf{Wx_j}])
+}}{
+\sum_{k \in \mathcal{N}_i}
+e^{\sigma(\mathbf{a}^T \,[\mathbf{Wx_i}\,\|\, \mathbf{Wx_k}])
+}} \quad; \sigma= LeakyReLU
+$$
+$$ x'_i = \sigma(\tilde{x_i}) \in \mathbb{R}^{F'}\quad; \tilde{x_i} =  \sum_{j \in \mathcal{N}_i} \alpha_{ij} \mathbf{W} x_j\quad;  \sigma= ELU
+$$
+-------------------------如果有k个multi-head-------------------------  
+learnable parameters $ \mathbf{W}_1,\mathbf{W}_2,...\mathbf{W}_k \quad  \mathbf{a}_1,\mathbf{a}_2,...\mathbf{a}_k$  
+中间层 *(拼接)*
+$$
+x_i'=[x_{i1}' \,\| x_{i2}' \,\| ...\,\| x_{ik}']  \in \mathbb{R}^{kF'} $$
+output层 *(先平均再激活)*
+$$ x_i'= \sigma(\frac{\sum_{j=1}^k\tilde{x}_{ij} }{k})  \in \mathbb{R}^{F'}$$

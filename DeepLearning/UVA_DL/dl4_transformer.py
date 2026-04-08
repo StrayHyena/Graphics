@@ -5,20 +5,20 @@ from matplotlib import pyplot as plt
 from torchvision import transforms
 from rich.traceback import install;install()
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-if device=='cpu': print('device is cpu!')
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+if DEVICE=='cpu': print('DEVICE is cpu!')
 torch.manual_seed(42) 
 if torch.cuda.is_available():
     torch.cuda.manual_seed(42)
     torch.cuda.manual_seed_all(42)
 torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = False
-log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),'logs',os.path.splitext(os.path.basename(__file__))[0])  # ./logs/filename/
-logger = SummaryWriter(log_path)
-model_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)),'models',os.path.splitext(os.path.basename(__file__))[0]) # ./models/filename/
-if not os.path.exists(model_dir): os.makedirs(model_dir)
-dataset_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),'datasets') # ./datasets
-batch_size = 64
+LOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),'logs',os.path.splitext(os.path.basename(__file__))[0])  # ./logs/filename/
+LOGGER = SummaryWriter(LOG_PATH)
+MODEL_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),'models',os.path.splitext(os.path.basename(__file__))[0]) # ./models/filename/
+if not os.path.exists(MODEL_DIR): os.makedirs(MODEL_DIR)
+DATASET_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),'datasets') # ./datasets
+BATCH_SIZE = 64
 
 class CosineWarmupScheduler(optim.lr_scheduler._LRScheduler):
     def __init__(self,optimizer, warmup_idx,iter_num):
@@ -42,18 +42,18 @@ class Transformer(nn.Module):
         def forward(self,x): return x+self.pe  # auto broadcasting
     # note:下面注释里写的shape都省去了Batch size.实际执行代码的时候是有这一维度的
     class MultiHeadAttention(nn.Module):
-        def __init__(self,dm,h=1):  # T:sequence length dm:embedding dim h:head number
+        def __init__(self,dm,h=1,dropout = 0.01):  # T:sequence length dm:embedding dim h:head number
             super().__init__()
             self.dk,self.W = dm//h,nn.ModuleDict()
             for s in ('Q','K','V'): self.W[s] = nn.ModuleList( [nn.Linear(dm,self.dk,bias=False) for i in range(h)] )
+            self.proj,self.attn_dropout,self.proj_dropout = nn.Linear(self.dk*h,dm),nn.Dropout(dropout),nn.Dropout(dropout)
         def forward(self,x):  # x shape (T,dm)
             out = []
             for Wq,Wk,Wv in zip(self.W['Q'],self.W['K'],self.W['V']):
-                # print(x.device,next(Wq.parameters()).device)
                 Q,K,V = Wq(x),Wk(x),Wv(x)                                      # shape (T,dk)
                 A = nn.Softmax(dim=-1)(Q@K.transpose(-1,-2)/math.sqrt(self.dk)) # shape (T,T)
-                out.append(A@V)                                                # shape (T,dk)
-            return torch.cat(out,dim=-1)  # shape (T,dm)
+                out.append( self.attn_dropout(A)@V)                                                # shape (T,dk)
+            return  self.proj_dropout( self.proj(torch.cat(out,dim=-1)))  # shape (T,dm)
 
     class Encoder(nn.Module):
         def __init__(self,dm,h=1,dh=-1): # @dh: hidden dimension of the feed forward layer; @h: head number 
@@ -64,12 +64,13 @@ class Transformer(nn.Module):
             self.ff = nn.Sequential(
                 nn.Linear(dm,dh),
                 nn.ReLU(),
+                nn.Dropout(0.01),
                 nn.Linear(dh,dm),
             )
             self.ln_ff = nn.LayerNorm(dm)
         def forward(self,x): # output  shape: (T,dm);|  input(embedding(after positional encoding)) shape: (T,dm); 
-            y = self.ln_mha(x+self.mha(x))
-            return self.ln_ff(y + self.ff(y))  
+            y = x+self.ln_mha(self.mha(x))
+            return y + self.ln_ff(self.ff(y))  
     
     # an encoder only transformer  
     def __init__(self,T,dm,h,d_out,dh=-1,encoder_num=6,pe=True,name=''):
@@ -84,7 +85,7 @@ class Transformer(nn.Module):
         )
     def forward(self,x):return self.out_net(self.encoders(self.pe(x)if self.pe is not None else x))  # output shape: (T,d_out)
     @property
-    def save_path(self):return os.path.join(model_dir,self.name)
+    def save_path(self):return os.path.join(MODEL_DIR,self.name)
 
 # @EXPERIMENT0 这个测试里，我们的任务是把一个长度是T的有序整数[0,128)序列s,进行反转(e.g.(2,3,6,7,1) --> (1,7,6,3,2))
 # 首先，考虑数字的embedding: 这里可以直接用 one-hot编码。而transformer的输出是T个logits
@@ -101,12 +102,12 @@ class SequenceReverse:
     def Test():
         T,dm = 10,128
         train_set,val_set,test_set = SequenceReverse.DataSet(T,dm),SequenceReverse.DataSet(T,dm,n=1000),SequenceReverse.DataSet(T,dm,n=10000),
-        train_loader,val_loader,test_loader = data.DataLoader(train_set,batch_size,drop_last=True),data.DataLoader(train_set,batch_size),data.DataLoader(train_set,batch_size)
+        train_loader,val_loader,test_loader = data.DataLoader(train_set,BATCH_SIZE,drop_last=True),data.DataLoader(train_set,BATCH_SIZE),data.DataLoader(train_set,BATCH_SIZE)
         model = Transformer(T,dm,1,train_set.numclass,name=SequenceReverse.name,pe=True)     
         if not os.path.exists(model.save_path): Train(model,train_loader,val_loader)
         model.load_state_dict(torch.load(model.save_path),strict=True)
         print(model.name + ' test acc is ',Eval(model,test_loader))
-        test_x = torch.tensor( (0,1,4,65,77,12,34,65,4,100)).to(device)
+        test_x = torch.tensor( (0,1,4,65,77,12,34,65,4,100)).to(DEVICE)
         test_y = model(F.one_hot(test_x,dm).float().unsqueeze(0)) # (1,T,dm)
         print('Inference Test\n x:',test_x,'\n y:',test_y.squeeze().argmax(dim=-1))
 
@@ -119,23 +120,23 @@ class SetAnormalyDetection:
     class DataSet(data.Dataset):
         def __init__(self,T=10,train=True):
             super().__init__()
-            file_path = os.path.join(dataset_path,SetAnormalyDetection.name+'-'+('Train' if train else 'Test')+'.pth')
+            file_path = os.path.join(DATASET_PATH,SetAnormalyDetection.name+'-'+('Train' if train else 'Test')+'.pth')
             if not os.path.exists(file_path):
                 from torchvision.datasets import CIFAR100
                 # ImageNet statistics. Note,DO NOT USE CIFAR100's MEAN & STD
                 DATA_MEANS = np.array([0.485, 0.456, 0.406])
                 DATA_STD = np.array([0.229, 0.224, 0.225])
                 transform = transforms.Compose([transforms.Resize((224,224)),transforms.ToTensor(),transforms.Normalize(DATA_MEANS,DATA_STD)])
-                data_set = CIFAR100(root=dataset_path, train=train, transform=transform, download=True)
+                data_set = CIFAR100(root=DATASET_PATH, train=train, transform=transform, download=True)
                 embeddings,targets = [],[] # imgs
-                # test_set = CIFAR100(root=dataset_path, train=False, transform=transforms,download=True)
-                res34 = torchvision.models.resnet34(pretrained=True).to(device)
-                res34.fc = nn.Identity().to(device) # 原始的fc是 512->1000;现在就直接是512
+                # test_set = CIFAR100(root=DATASET_PATH, train=False, transform=transforms,download=True)
+                res34 = torchvision.models.resnet34(pretrained=True).to(DEVICE)
+                res34.fc = nn.Identity().to(DEVICE) # 原始的fc是 512->1000;现在就直接是512
                 res34.eval()
                 with torch.no_grad():
                     for imgs,labels in data.DataLoader(data_set,64,shuffle=False,drop_last=False):
-                        embeddings.append(res34(imgs.to(device)))  # (B,X)
-                        targets.append(labels.to(device))
+                        embeddings.append(res34(imgs.to(DEVICE)))  # (B,X)
+                        targets.append(labels.to(DEVICE))
                 embeddings,targets = torch.cat(embeddings,dim=0),torch.cat(targets,dim=0)
                 label2embeddings,datas,labels = [embeddings[targets==k] for k in range(100)],[],[]
                 for _ in range(data_set.data.shape[0]):
@@ -157,7 +158,7 @@ class SetAnormalyDetection:
         T = 10
         train_val_set,test_set = SetAnormalyDetection.DataSet(T),SetAnormalyDetection.DataSet(T,False)
         train_set,val_set = torch.utils.data.random_split(train_val_set,[45000,5000])
-        train_loader,val_loader,test_loader = data.DataLoader(train_set,batch_size,True,drop_last=True),data.DataLoader(val_set,batch_size,True,drop_last=False),data.DataLoader(test_set,batch_size,True,drop_last=False)
+        train_loader,val_loader,test_loader = data.DataLoader(train_set,BATCH_SIZE,True,drop_last=True),data.DataLoader(val_set,BATCH_SIZE,True,drop_last=False),data.DataLoader(test_set,BATCH_SIZE,True,drop_last=False)
         model = Transformer(T,test_set.dm,8,1,pe=False,name = SetAnormalyDetection.name)
         if not os.path.exists(model.save_path):Train(model,train_loader,val_loader,num_epochs=20)
         model.load_state_dict(torch.load(model.save_path),strict=True)
@@ -165,38 +166,38 @@ class SetAnormalyDetection:
 
 @torch.no_grad()
 def Eval(model,dataloader):
-    model,correct,num = model.to(device),0,0
+    model,correct,num = model.to(DEVICE),0,0
     model.eval()
     for seqs,labels in dataloader:
-        seqs,labels = seqs.to(device),labels.to(device)
+        seqs,labels = seqs.to(DEVICE),labels.to(DEVICE)
         predict = model(seqs) # (B, T, number class) for SeqReverse ,  (B,T,1) for SetAnormal
         correct += (predict.squeeze(dim=-1).argmax(dim=-1)==labels).sum().item()
         num += labels.size(0) * (predict.shape[1] if SequenceReverse.name in model.name else 1)  # batch size * number classes 
     return correct/num
 
 def Train(model,train_loader,val_loader,criterion=nn.CrossEntropyLoss(),num_epochs=10):
-    shutil.rmtree(log_path, ignore_errors=True) 
-    os.makedirs(log_path, exist_ok=True)
+    shutil.rmtree(LOG_PATH, ignore_errors=True) 
+    os.makedirs(LOG_PATH, exist_ok=True)
     optimizer = optim.AdamW(model.parameters(),weight_decay=1e-4)
     scheduler = CosineWarmupScheduler(optimizer,50,num_epochs*len(train_loader))
-    model,best_val_acc = model.to(device),0.0
+    model,best_val_acc = model.to(DEVICE),0.0
     for epoch in tqdm.tqdm(range(num_epochs)):
         epoch_loss = 0.0
         model.train()
         for batch_idx,(seqs,labels) in enumerate(train_loader):
-            y_hat = model(seqs.to(device)).squeeze(dim=-1)
+            y_hat = model(seqs.to(DEVICE)).squeeze(dim=-1)
             # 如果 y_hat shape是(B,T,num_class)最后一维是class维度，但是CrossEntropyLoss要求，input的Class维度在dim=1(第二位)
             # 如果 y_hat shape是(B,num_class) 就无需transpose
             if len(y_hat.shape)==3: y_hat = y_hat.transpose(-1,-2)
-            loss = criterion(y_hat,labels.to(device))
+            loss = criterion(y_hat,labels.to(DEVICE))
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
             scheduler.step()
             epoch_loss+=loss.item()*len(labels)
-        logger.add_scalar(f'{model.name} train loss',epoch_loss,global_step=epoch)
+        LOGGER.add_scalar(f'{model.name} train loss',epoch_loss,global_step=epoch)
         val_acc = Eval(model,val_loader)
-        logger.add_scalar(f'{model.name} val acc',val_acc,global_step=epoch)
+        LOGGER.add_scalar(f'{model.name} val acc',val_acc,global_step=epoch)
         if val_acc>best_val_acc         :
             best_val_acc=val_acc
             torch.save(model.state_dict(),model.save_path)
