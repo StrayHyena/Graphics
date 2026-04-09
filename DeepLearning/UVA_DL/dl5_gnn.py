@@ -25,26 +25,23 @@ class GATLayer(nn.Module):
         super().__init__()
         self.h,self.is_concat,d_prime = head_num,is_concat,d_out
         if is_concat:  assert d_out % head_num == 0;d_prime //= head_num
-        self.W = nn.ModuleList([nn.Linaer(d_in,d_prime)for _ in range(self.h)])
-        self.a = nn.ModuleList([nn.Linaer(1,2*d_prime)for _ in range(self.h)])
-        self.attn_sigma = nn.LeakyReLU(0.2)
-        self.sigma = nn.ELU()
-    # NOTE: MAKE SURE edge_index contains self loop 
+        self.W = nn.ModuleList([nn.Linear(d_in,d_prime)for _ in range(self.h)])
+        self.a = nn.ModuleList([nn.Linear(2*d_prime,1)for _ in range(self.h)])
+        self.attn_sigma,self.sigma,self.softmax = nn.LeakyReLU(0.2),nn.ELU(),nn.Softmax(dim=-1)
+    # ACHTUNG MAKE SURE edge_index contains self loop already!
     def forward(self,x,edge_index): # x(N,d_in)  edge_index(2,E)
         N,x_tildes = x.size(-2), []
         vi,vj = edge_index  # (E) (E)
         for W,a in zip(self.W,self.a):
             Wx = W(x)  # (N,d')
-            WxPair =  torch.concat([Wx[vi],Wx[vj]],dim=-1)  # Wx[vi]  (E,d'); Wx[vj]  (E,d'); result  (E,2d')
+            WxPair =  torch.concat([Wx[vi],Wx[vj]],dim=-1)  # Wx[vi] and Wx[vj] shape (E,d'); result shape (E,2d')
             yPair = self.attn_sigma(a(WxPair))  # (E,1)
             A = torch.zeros(N,N)
             A.scatter_add_(-1,vj,yPair)
-            A = nn.Softmax(dim=-1)(A)
-            x_tildes.append(A@Wx)
-        x_prime = 
-        if self.is_concat:
-            return torch.concat(x_primes,-1)
-        return 
+            x_tildes.append(self.softmax(A)@Wx)   # (N,d')
+        x_primes = torch.stack(x_tildes)  # (h,N,d')
+        x_primes = x_primes.permute(1,0,2).reshape(N,-1) if self.is_concat else x_primes.mean(0)
+        return self.sigma(x_primes)
 
 class NodeLevelTask:
     @staticmethod
