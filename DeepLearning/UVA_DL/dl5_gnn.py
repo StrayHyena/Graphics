@@ -1,4 +1,4 @@
-import torch,tqdm,os,shutil,enum,math,torchvision,torch_geometric
+import torch,tqdm,os,shutil,enum,math,torchvision,torch_geometric,torch_scatter
 import torch.utils.data as data,torch.nn as nn,torch.optim as optim,torch.nn.functional as F,numpy as np,torch_geometric.nn as geom_nn, torch_geometric.data as geom_data
 from torch.utils.tensorboard import SummaryWriter
 from matplotlib import pyplot as plt
@@ -27,18 +27,16 @@ class GATLayer(nn.Module):
         if is_concat:  assert d_out % head_num == 0;d_prime //= head_num
         self.W = nn.ModuleList([nn.Linear(d_in,d_prime)for _ in range(self.h)])
         self.a = nn.ModuleList([nn.Linear(2*d_prime,1)for _ in range(self.h)])
-        self.attn_sigma,self.sigma,self.softmax = nn.LeakyReLU(0.2),nn.ELU(),nn.Softmax(dim=-1)
+        self.attn_sigma,self.sigma = nn.LeakyReLU(0.2),nn.ELU()
     # ACHTUNG MAKE SURE edge_index contains self loop already!
     def forward(self,x,edge_index): # x(N,d_in)  edge_index(2,E)
         N,x_tildes = x.size(-2), []
-        vi,vj = edge_index  # (E) (E)
+        v_src,v_tgt = edge_index  # (E) (E)
         for W,a in zip(self.W,self.a):
             Wx = W(x)  # (N,d')
-            WxPair =  torch.concat([Wx[vi],Wx[vj]],dim=-1)  # Wx[vi] and Wx[vj] shape (E,d'); result shape (E,2d')
-            yPair = self.attn_sigma(a(WxPair))  # (E,1)
-            A = torch.zeros(N,N)
-            A.scatter_add_(-1,vj,yPair)
-            x_tildes.append(self.softmax(A)@Wx)   # (N,d')
+            WxPair =  torch.concat([Wx[v_tgt],Wx[v_src]],dim=-1)  # Wx[v_tgt] and Wx[v_src] shape (E,d'); result shape (E,2d')
+            alpha = torch_scatter.scatter_softmax(self.attn_sigma(a(WxPair)).squeeze(-1),v_tgt,0,N)  # (E)
+            x_tildes.append(torch_scatter.scatter_add(alpha.unsqueeze(-1)*Wx[v_src],v_tgt,0,N))   # alpha.unsqu(E,1)  * Wx[vi] (E,d')
         x_primes = torch.stack(x_tildes)  # (h,N,d')
         x_primes = x_primes.permute(1,0,2).reshape(N,-1) if self.is_concat else x_primes.mean(0)
         return self.sigma(x_primes)
