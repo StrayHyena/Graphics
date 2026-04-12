@@ -69,6 +69,9 @@ CUDA(on my machine)     12.9
 - a[mask], mask is like[False,True,False,False,True]。它的作用是取a的第2个和第5个元素(结果的size是2)。
 - a[idx], idx is like[1,4]。同上
 - 注意 a[[0,1,0,0,1]]和上式不等价！
+## Torch Scatter  
+- scatter_softmax(src) 返回的维度和src的维度相同
+- scatter_add(src,index,dim,dim_size) 返回的维度和dim_size相同
 # **2** Miscellaneous Topics
 ## Pytorch Best Pratice
 - 很多关于维度的参数，能用-1,-2就用-1,-2。而不是硬编码，因为有时候会忘记Batch这一个维度，导致你认为的dim不正确
@@ -218,12 +221,28 @@ e^{\sigma(\mathbf{a}^T \,[\mathbf{Wx_i}\,\|\, \mathbf{Wx_j}])
 e^{\sigma(\mathbf{a}^T \,[\mathbf{Wx_i}\,\|\, \mathbf{Wx_k}])
 }} \quad; \sigma= LeakyReLU
 $$
-$$ x'_i = \sigma(\tilde{x_i}) \in \mathbb{R}^{F'}\quad; \tilde{x_i} =  \sum_{j \in \mathcal{N}_i} \alpha_{ij} \mathbf{W} x_j\quad;  \sigma= ELU
+$$ \tilde{x_i} =  \sum_{j \in \mathcal{N}_i} Dropout(\alpha_{ij}) \mathbf{W} x_j\quad;
 $$
 -------------------------如果有k个multi-head-------------------------  
 learnable parameters $ \mathbf{W}_1,\mathbf{W}_2,...\mathbf{W}_k \quad  \mathbf{a}_1,\mathbf{a}_2,...\mathbf{a}_k$  
 中间层 *(拼接)*
 $$
-x_i'=[x_{i1}' \,\| x_{i2}' \,\| ...\,\| x_{ik}']  \in \mathbb{R}^{kF'} $$
+x_i'= \sigma[\tilde{x}_{i1} \,\| \tilde{x}_{i2}' \,\| ...\,\| \tilde{x}_{ik}']  \in \mathbb{R}^{kF'} $$
 output层 *(先平均再激活)*
 $$ x_i'= \sigma(\frac{\sum_{j=1}^k\tilde{x}_{ij} }{k})  \in \mathbb{R}^{F'}$$
+但是一般在工程实现中，GAT Layer一般不加最后的这个激活函数，这个激活函数会放在此Layer的外面。
+### Node Level Task
+input : $x (N,d_{in})$  
+output: $(N,n_{class})$  
+[GAT,Relu,Dropout, GAT,Relu,Dropout,......, GAT  ] 
+### Graph Level Task  
+input : $x (N,d_{in}) \quad  batch (N)$  
+output: $(B,n_{class})$  
+[GAT,Relu,Dropout, GAT,Relu,Dropout,......,avg_pool(N,d_out==>B,d_out), Dropout,fc  ] 
+
+## TODO: GIN
+# **6** EBM
+## 最大似然估计
+1. intuition: 数据 $x$ 已知（已经观测到了），寻找哪种参数 $\theta$ 最能解释这些数据。  
+最大似然估计（MLE） 的目标就是：通过调整模型参数 $\theta$，使得观测到现有样本数据的“可能性”（即似然函数值）达到最大。  
+2. 有一组独立同分布（i.i.d.）的样本 $X = \{x_1, x_2, \dots, x_n\}$，其概率密度函数为 $f(x|\theta)$。由于样本是独立的，联合概率分布可以写成各项概率的乘积：$$L(\theta) = L(\theta; x_1, \dots, x_n) = \prod_{i=1}^{n} f(x_i | \theta)$$通常对似然函数取自然对数，将乘法变为加法：$$\ell(\theta) = \log L(\theta) = \sum_{i=1}^{n} \log f(x_i | \theta)$$由于 $\log$ 函数在定义域内是单调递增的，使得 $\ell(\theta)$ 最大的 $\theta$ 同样也会使 $L(\theta)$ 最大。求解过程在参数空间内寻找使似然函数最大的点，通常通过对参数 $\theta$ 求导并令导数为 0（即寻找驻点）来解决：$$\frac{\partial \ell(\theta)}{\partial \theta} = 0$$
