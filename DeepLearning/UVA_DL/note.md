@@ -72,9 +72,9 @@ CUDA(on my machine)     12.9
 ## Torch Scatter  
 - scatter_softmax(src) 返回的维度和src的维度相同
 - scatter_add(src,index,dim,dim_size) 返回的维度和dim_size相同
-# **2** Miscellaneous Topics
 ## Pytorch Best Pratice
 - 很多关于维度的参数，能用-1,-2就用-1,-2。而不是硬编码，因为有时候会忘记Batch这一个维度，导致你认为的dim不正确
+# **2** Miscellaneous Topics
 ## Activation Functions
 1.  $\sigma(x) = \frac{1}{1 + e^{-x}}$  
 2. $\tanh(x) = \frac{e^x - e^{-x}}{e^x + e^{-x}}$  
@@ -245,4 +245,43 @@ output: $(B,n_{class})$
 ## 最大似然估计
 1. intuition: 数据 $x$ 已知（已经观测到了），寻找哪种参数 $\theta$ 最能解释这些数据。  
 最大似然估计（MLE） 的目标就是：通过调整模型参数 $\theta$，使得观测到现有样本数据的“可能性”（即似然函数值）达到最大。  
-2. 有一组独立同分布（i.i.d.）的样本 $X = \{x_1, x_2, \dots, x_n\}$，其概率密度函数为 $f(x|\theta)$。由于样本是独立的，联合概率分布可以写成各项概率的乘积：$$L(\theta) = L(\theta; x_1, \dots, x_n) = \prod_{i=1}^{n} f(x_i | \theta)$$通常对似然函数取自然对数，将乘法变为加法：$$\ell(\theta) = \log L(\theta) = \sum_{i=1}^{n} \log f(x_i | \theta)$$由于 $\log$ 函数在定义域内是单调递增的，使得 $\ell(\theta)$ 最大的 $\theta$ 同样也会使 $L(\theta)$ 最大。求解过程在参数空间内寻找使似然函数最大的点，通常通过对参数 $\theta$ 求导并令导数为 0（即寻找驻点）来解决：$$\frac{\partial \ell(\theta)}{\partial \theta} = 0$$
+2. 有一组独立同分布（i.i.d.）的样本 $X = \{x_1, x_2, \dots, x_n\}$，其概率密度函数为 $f(x|\theta)$。由于样本是独立的，联合概率分布可以写成各项概率的乘积：$$L(\theta) = L(\theta; x_1, \dots, x_n) = \prod_{i=1}^{n} f(x_i | \theta)$$通常对似然函数取自然对数，将乘法变为加法：$$\ell(\theta) = \log L(\theta) = \sum_{i=1}^{n} \log f(x_i | \theta)$$由于 $\log$ 函数在定义域内是单调递增的，使得 $\ell(\theta)$ 最大的 $\theta$ 同样也会使 $L(\theta)$ 最大。求解过程在参数空间内寻找使似然函数最大的点，通常通过对参数 $\theta$ 求导并令导数为 0（即寻找驻点）来解决：$$\frac{\partial \ell(\theta)}{\partial \theta} = 0$$  
+## [朗之万动力学采样](./dl6_Langevin.py)
+已知一个概率密度函数 $p(\mathbf{x})$（通常只知道它的形状，不知道归一化常数），如何产生一组服从该分布的样本点 $\mathbf{x}_1, \mathbf{x}_2, \dots, \mathbf{x}_n$
+$$U(\mathbf{x}) = -\log p(\mathbf{x})$$
+$$\mathbf{x}_{t+1} = \mathbf{x}_t - \delta \nabla U(\mathbf{x}_t) + \sqrt{2\delta} \boldsymbol{\epsilon}_t, \quad \boldsymbol{\epsilon}_t \sim \mathcal{N}(0, \mathbf{I})$$
+注意,并不是迭代完成后产生了一个数据点，而是每一步迭代都产生一个数据点。  
+$\delta$：步长（学习率/时间步）  
+$\mathbf{x}_0$:可以指定=0，也可以从一个简单的分布（如标准高斯分布）中随机采样
+## Energy Model  
+_下述讨论认为θ固定,_  
+能量函数通常由一个神经网络 $f_\theta$ 表示，定义为：$$E(\mathbf{x},\theta) = f(\mathbf{x},\theta)$$我们可以构造一个合法的概率密度函数 $p(\mathbf{x},\theta)$：$$p(\mathbf{x},\theta) = \frac{e^{-E(\mathbf{x},\theta)}}{\int_t e^{-E(\mathbf{t},\theta)} d\mathbf{t}}$$通过观察这个公式，我们可以发现：能量越低，该点的概率密度越高。在训练过程中，我们的目标是调整参数 $\theta$，使得我们观测到的真实数据具有较低的能量（即较高的概率），而对于模型生成的（或不真实的）数据，则赋予较高的能量。  
+另:我们把分母$\int_t e^{-E_\theta(\mathbf{t})} d\mathbf{t}$称做配分函数$Z(\theta)$  
+
+_下述讨论认为x固定,即x是已有的观测点(train)_  
+由于配分函数 $Z(\theta)$ 的存在，我们无法直接通过极大似然估计来训练 EBM。如果我们尝试对对数似然函数 $\log p(\mathbf{x})$ 求梯度，会得到如下结果：$$\nabla_\theta \log p_\theta(\mathbf{x}) = -\nabla_\theta E_\theta(\mathbf{x}) + \nabla_\theta \log Z(\theta)$$通过数学推导，第二项 $\nabla_\theta \log Z(\theta)$ 实际上可以表示为模型分布下能量梯度的期望值：$$\nabla_\theta \log Z(\theta) = \mathbb{E}_{\mathbf{x}' \sim p_\theta} [\nabla_\theta E_\theta(\mathbf{x}')]$$因此，整个对数似然的梯度为：$$\nabla_\theta \log p_\theta(\mathbf{x}) = -\nabla_\theta E_\theta(\mathbf{x}) + \mathbb{E}_{\mathbf{x}' \sim p_\theta} [\nabla_\theta E_\theta(\mathbf{x}')]$$  
+## Loss Function
+我们的目标是最大化$p_\theta(\mathbf{x}) \quad x \sim pdf_{real}$  
+也即最大化  $\log p_\theta(\mathbf{x})$  
+由于此概率密度有不易计算的归一化常数,我们不妨先考察其梯度。(如果沿梯度方向一直走,自然会增大)  
+$\nabla_\theta \log p_\theta(\mathbf{x}) = -\mathbb{E}_{\mathbf{x} \sim pdf_{real}} [\nabla_\theta E_\theta(\mathbf{x})] + \mathbb{E}_{\mathbf{x}' \sim p_\theta} [\nabla_\theta E_\theta(\mathbf{x}')]$  
+根据损失函数的负梯度是上述等式反推损失函数  
+$\mathcal{L} = \frac{1}{N} \sum_i(E_\theta(\mathbf{x}_i) - E_\theta(\mathbf{x}'_i))$
+## Algorithm : Training an energy-based model for generative image modeling
+**1:** Initialize empty buffer $B \leftarrow \emptyset$  
+**2:** **while** not converged **do**   
+**3:** $\quad$ Sample data from dataset: $\mathbf{x}_i^+ \sim p_{\mathcal{D}}$  
+**4:** $\quad$ Sample initial fake data: $\mathbf{x}_i^0 \sim B$ with $95\%$ probability, else $\mathcal{U}(-1, 1)$  
+**5:** $\quad$ **for** sample step $k=1$ **to** $K$ **do** $\qquad \triangleright$ Generate sample via Langevin dynamics  
+**6:** $\quad \quad \tilde{\mathbf{x}}^k \leftarrow \tilde{\mathbf{x}}^{k-1} - \eta \nabla_x E_\theta(\tilde{\mathbf{x}}^{k-1}) + \omega$, where $\omega \sim \mathcal{N}(0, \sigma) \quad \tilde{\mathbf{x}}^0=\mathbf{x}_i^0$  
+**7:** $\quad$ **end for**   
+**8:** $\quad \mathbf{x}^- \leftarrow \Omega(\tilde{\mathbf{x}}^K) \qquad \qquad \qquad \qquad \quad \triangleright \Omega: \text{不追踪梯度}$  
+**9:** $\quad$ Contrastive divergence: $\mathcal{L}_{CD} = \frac{1}{N} \sum_i(E_\theta(\mathbf{x}_i^+) - E_\theta(\mathbf{x}_i^-))$  
+**10:** $\quad$ Regularization loss: $\mathcal{L}_{RG} = \frac{1}{N} \sum_i(E_\theta(\mathbf{x}_i^+)^2 + E_\theta(\mathbf{x}_i^-)^2)$  
+**11:** $\quad$ Perform SGD/Adam on $\nabla_\theta(\mathcal{L}_{CD} + \alpha \mathcal{L}_{RG})$  
+**12:** $\quad$ Add samples to buffer: $B \leftarrow B \cup \mathbf{x}^-$  
+**13:** **end while**  
+注:上标+表示真实样本。$p_{\mathcal{D}}$表示真实概率密度。上标-表示预测/虚假样本。下标i表示一个样本点。  
+第6行的$E_\theta(\mathbf{x})$对应$-\log p(\mathbf{x}, \theta)$    
+N是batch size,这也就意味着,我必须生成N个假样本点(即4-7行)。  
+一旦θ达到最优,我们就可以使用朗之万采样不断生成以假乱真的数据点了
