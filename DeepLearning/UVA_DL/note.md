@@ -248,7 +248,7 @@ output: $(B,n_{class})$
 2. 有一组独立同分布（i.i.d.）的样本 $X = \{x_1, x_2, \dots, x_n\}$，其概率密度函数为 $f(x|\theta)$。由于样本是独立的，联合概率分布可以写成各项概率的乘积：$$L(\theta) = L(\theta; x_1, \dots, x_n) = \prod_{i=1}^{n} f(x_i | \theta)$$通常对似然函数取自然对数，将乘法变为加法：$$\ell(\theta) = \log L(\theta) = \sum_{i=1}^{n} \log f(x_i | \theta)$$由于 $\log$ 函数在定义域内是单调递增的，使得 $\ell(\theta)$ 最大的 $\theta$ 同样也会使 $L(\theta)$ 最大。求解过程在参数空间内寻找使似然函数最大的点，通常通过对参数 $\theta$ 求导并令导数为 0（即寻找驻点）来解决：$$\frac{\partial \ell(\theta)}{\partial \theta} = 0$$  
 ## [朗之万动力学采样](./dl6_Langevin.py)
 已知一个概率密度函数 $p(\mathbf{x})$（通常只知道它的形状，不知道归一化常数），如何产生一组服从该分布的样本点 $\mathbf{x}_1, \mathbf{x}_2, \dots, \mathbf{x}_n$
-$$U(\mathbf{x}) = -\log p(\mathbf{x})$$
+$$p(x) = \frac{e^{-E(x)}}{Z}$$
 $$\mathbf{x}_{t+1} = \mathbf{x}_t - \delta \nabla U(\mathbf{x}_t) + \sqrt{2\delta} \boldsymbol{\epsilon}_t, \quad \boldsymbol{\epsilon}_t \sim \mathcal{N}(0, \mathbf{I})$$
 注意,并不是迭代完成后产生了一个数据点，而是每一步迭代都产生一个数据点。  
 $\delta$：步长（学习率/时间步）  
@@ -284,4 +284,18 @@ $\mathcal{L} = \frac{1}{N} \sum_i(E_\theta(\mathbf{x}_i) - E_\theta(\mathbf{x}'_
 注:上标+表示真实样本。$p_{\mathcal{D}}$表示真实概率密度。上标-表示预测/虚假样本。下标i表示一个样本点。  
 第6行的$E_\theta(\mathbf{x})$对应$-\log p(\mathbf{x}, \theta)$    
 N是batch size,这也就意味着,我必须生成N个假样本点(即4-7行)。  
-一旦θ达到最优,我们就可以使用朗之万采样不断生成以假乱真的数据点了
+在实践中,sample buffer B一般不是追加的，而是一开始就是定好size的随机噪声，每次都会pop出最老的那些样本。  
+一旦θ达到最优,我们就可以使用朗之万采样不断生成以假乱真的数据点了  
+## 超参数 (论文Appendix.11) 
+EBM对于超参数十分敏感  
+*朗之万MCMC*  
+>K=60  
+standard deviation λ =0.005  
+clamp gradient 0.01  
+step size = 10  
+
+*Optimizer*  
+>Adam  
+$\beta_1=0.0$  
+$\beta_2=0.999$  
+lr=1e-4  
