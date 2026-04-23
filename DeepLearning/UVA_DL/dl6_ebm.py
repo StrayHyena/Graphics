@@ -24,7 +24,7 @@ mnist_transform = torchvision.transforms.Compose([
     torchvision.transforms.Normalize((0.5,), (0.5,))
 ])
 dataset = torchvision.datasets.MNIST(DATASET_PATH,True,transform=mnist_transform, download=True)
-dataloader = torch.utils.data.DataLoader(BATCH_SIZE,shuffle=True,drop_last=True)
+dataloader = torch.utils.data.DataLoader(dataset,BATCH_SIZE,shuffle=True,drop_last=True)
 
 class MNISTEnergy(nn.Module):
     def __init__(self,d_hidden=32,sample_buffer_size=10000):
@@ -48,6 +48,8 @@ class MNISTEnergy(nn.Module):
         samples = torch.rand((sample_buffer_size,1,28,28))*2-1
         self.register_buffer('samples',samples)
     def forward(self,x):return self.net(x).squeeze(-1)
+    @property
+    def save_path(self):return os.path.join(MODEL_DIR,type(self).__name__)
     def Sample(self,cnt=BATCH_SIZE,step_size=10,std=0.005,K=60):
         prev_enable_grad,prev_training,GRAD_CLIP = torch.enable_grad(),self.training,0.03
         torch.set_grad_enabled(True)
@@ -66,11 +68,27 @@ class MNISTEnergy(nn.Module):
         self.samples = torch.cat([self.samples[cnt:],x],dim=0)
         return x
 
-def Train(energy_model):
+def Train(energy_model,epoch_num=100):
     optimizer = optim.AdamW(energy_model.parameters(),weight_decay=5e-4,lr=1e-4)
-
+    energy_model.to(DEVICE)
+    for epoch in tqdm.tqdm(range(epoch_num)):
+        energy_model.train()
+        epoch_loss = 0.0
+        for x_pos,_ in dataloader:
+            optimizer.zero_grad()
+            x_neg = energy_model.Sample()
+            E_pos = energy_model(x_pos.to(DEVICE))
+            E_neg = energy_model(x_neg.to(DEVICE))
+            L = (E_pos.mean()-E_neg.mean()) + (E_pos*E_pos).mean()+(E_neg*E_neg).mean()
+            L.backward()
+            optimizer.step()
+            epoch_loss += L
+        LOGGER.add_scalar('loss',epoch_loss,epoch)
+    torch.save(energy_model.state_dict(),energy_model.save_path)
 
 def Main():
-    pass
+    model = MNISTEnergy()
+    if not os.path.exists(model.save_path):Train(model)
+    model.load_state_dict(torch.load(model.save_path),strict=True)
 
 if __name__ == '__main__': Main()
