@@ -51,22 +51,23 @@ class MNISTEnergy(nn.Module):
     @property
     def save_path(self):return os.path.join(MODEL_DIR,type(self).__name__)
     def Sample(self,cnt=BATCH_SIZE,step_size=10,std=0.005,K=60):
-        prev_enable_grad,prev_training,GRAD_CLIP = torch.enable_grad(),self.training,0.03
+        prev_enable_grad,prev_training,GRAD_CLIP,device = torch.is_grad_enabled(),self.training,0.03,self.samples.device
         torch.set_grad_enabled(True)
         self.eval()
         for p in self.parameters():p.requires_grad=False
         # Langevin MCMC
-        x = torch.where(torch.rand(cnt)<0.05, torch.rand((1,28,28))*2-1, self.samples[:cnt]).requires_gard_()  # x0
+        x = torch.where((torch.rand(cnt,device=device)<0.05).reshape(cnt,1,1,1), torch.rand((1,1,28,28),device=device)*2-1, self.samples[:cnt]).requires_grad_()  # x0
         for _ in range(K):
+            # print(f"x: is_leaf={x.is_leaf}, requires_grad={x.requires_grad}, grad_fn={x.grad_fn}")
             self.forward(x).sum().backward()  # now we have grad in x
-            x += std*torch.randn(x.shape) - step_size*x.grad.clamp_(-GRAD_CLIP,GRAD_CLIP).detach()
-            x.grad.zero_()
-        
+            if x.grad is None:print(_,' x grad is None ')
+            x = (x.detach() + std*torch.randn(x.shape,device=device) - step_size*x.grad.clamp_(-GRAD_CLIP,GRAD_CLIP)).requires_grad_()
+
         torch.set_grad_enabled(prev_enable_grad) # restore previous enable grad
         if prev_training:self.train()
         for p in self.parameters(): p.requires_grad_()
-        self.samples = torch.cat([self.samples[cnt:],x],dim=0)
-        return x
+        self.samples = torch.cat([self.samples[cnt:],x.detach()],dim=0)
+        return x.detach()
 
 def Train(energy_model,epoch_num=100):
     optimizer = optim.AdamW(energy_model.parameters(),weight_decay=5e-4,lr=1e-4)
@@ -82,7 +83,7 @@ def Train(energy_model,epoch_num=100):
             L = (E_pos.mean()-E_neg.mean()) + (E_pos*E_pos).mean()+(E_neg*E_neg).mean()
             L.backward()
             optimizer.step()
-            epoch_loss += L
+            epoch_loss += L.item()
         LOGGER.add_scalar('loss',epoch_loss,epoch)
     torch.save(energy_model.state_dict(),energy_model.save_path)
 
