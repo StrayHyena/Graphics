@@ -1,5 +1,5 @@
 import torch,tqdm,os,shutil,enum,math,torchvision
-import torch.utils.data as data,torch.nn as nn,torch.optim as optim,torch.nn.functional as F,numpy as np,torch_geometric.nn as geom_nn, torch_geometric.data as geom_data
+import torch.utils.data as data,torch.nn as nn,torch.optim as optim,torch.nn.functional as F,numpy as np
 from torch.utils.tensorboard import SummaryWriter
 from matplotlib import pyplot as plt
 from rich.traceback import install;install()
@@ -26,7 +26,7 @@ mnist_transform = torchvision.transforms.Compose([
 dataset = torchvision.datasets.MNIST(DATASET_PATH,True,transform=mnist_transform, download=True)
 dataloader = torch.utils.data.DataLoader(dataset,BATCH_SIZE,shuffle=True,drop_last=True)
 
-class MNISTEnergy(nn.Module):
+class MNISTEBM(nn.Module):
     def __init__(self,d_hidden=32,sample_buffer_size=10000):
         super().__init__()
         d1,d2,d3 = d_hidden//2,d_hidden,d_hidden*2
@@ -50,46 +50,57 @@ class MNISTEnergy(nn.Module):
     def forward(self,x):return self.net(x).squeeze(-1)
     @property
     def save_path(self):return os.path.join(MODEL_DIR,type(self).__name__)
-    def Sample(self,cnt=BATCH_SIZE,step_size=10,std=0.005,K=60):
+    def Sample(self,cnt=BATCH_SIZE,step_size=10,std=0.005,K=60,sample_buffer_rate=0.95):
         prev_enable_grad,prev_training,GRAD_CLIP,device = torch.is_grad_enabled(),self.training,0.03,self.samples.device
         torch.set_grad_enabled(True)
         self.eval()
         for p in self.parameters():p.requires_grad=False
-        # Langevin MCMC
-        x = torch.where((torch.rand(cnt,device=device)<0.05).reshape(cnt,1,1,1), torch.rand((1,1,28,28),device=device)*2-1, self.samples[:cnt]).requires_grad_()  # x0
+        # Langevin MCMC 注意 np.where的b要是(cnt,1,28,28)(这是cnt个不同的噪声)而不能是(1,1,28,28)(这是被广播的cnt个相同的噪声)
+        choice = torch.randint(0,len(self.samples),(cnt,))
+        x = torch.where((torch.rand(cnt,device=device)<sample_buffer_rate).reshape(cnt,1,1,1), self.samples[choice], torch.rand((cnt,1,28,28),device=device)*2-1).requires_grad_()  # x0
         for _ in range(K):
-            # print(f"x: is_leaf={x.is_leaf}, requires_grad={x.requires_grad}, grad_fn={x.grad_fn}")
-            self.forward(x).sum().backward()  # now we have grad in x
-            if x.grad is None:print(_,' x grad is None ')
-            x = (x.detach() + std*torch.randn(x.shape,device=device) - step_size*x.grad.clamp_(-GRAD_CLIP,GRAD_CLIP)).requires_grad_()
+            self.forward(x).sum().backward() 
+            x = (x.detach() + std*torch.randn(x.shape,device=device) - step_size*x.grad.clamp_(-GRAD_CLIP,GRAD_CLIP)).clamp_(-1,1).requires_grad_()
 
         torch.set_grad_enabled(prev_enable_grad) # restore previous enable grad
         if prev_training:self.train()
         for p in self.parameters(): p.requires_grad_()
-        self.samples = torch.cat([self.samples[cnt:],x.detach()],dim=0)
+        self.samples[choice] = x.detach()
         return x.detach()
 
-def Train(energy_model,epoch_num=100):
-    optimizer = optim.AdamW(energy_model.parameters(),weight_decay=5e-4,lr=1e-4)
+def Train(energy_model,epoch_num=100,alpha=0.1):
+    shutil.rmtree(LOG_PATH, ignore_errors=True);os.makedirs(LOG_PATH, exist_ok=True)
+    optimizer = optim.AdamW(energy_model.parameters(),lr=1e-4,betas=(0.0,0.999))
+    scheduler = optim.lr_scheduler.StepLR(optimizer, 1, gamma=0.97)
     energy_model.to(DEVICE)
     for epoch in tqdm.tqdm(range(epoch_num)):
         energy_model.train()
-        epoch_loss = 0.0
+        epoch_L,epoch_Lcdiv,epoch_Lreg,epoch_posmean,epoch_negmean, = 0.0,0.0,0.0,0.0,0.0,                                   
         for x_pos,_ in dataloader:
+            x_pos.add_(torch.randn_like(x_pos) * 0.005).clamp_(min=-1.0, max=1.0) # 
             optimizer.zero_grad()
-            x_neg = energy_model.Sample()
-            E_pos = energy_model(x_pos.to(DEVICE))
-            E_neg = energy_model(x_neg.to(DEVICE))
-            L = (E_pos.mean()-E_neg.mean()) + (E_pos*E_pos).mean()+(E_neg*E_neg).mean()
+            E_pos,E_neg = energy_model(torch.cat([x_pos.to(DEVICE),energy_model.Sample()],dim=0)).chunk(2,dim=0)
+            Lcdiv,Lreg =E_pos.mean()-E_neg.mean(), alpha*(E_pos*E_pos+E_neg*E_neg).mean()
+            L = Lcdiv+Lreg
             L.backward()
+            torch.nn.utils.clip_grad_norm_(energy_model.parameters(), max_norm=0.1)
             optimizer.step()
-            epoch_loss += L.item()
-        LOGGER.add_scalar('loss',epoch_loss,epoch)
+            epoch_L += L.item();epoch_Lcdiv += Lcdiv.item();epoch_Lreg += Lreg.item();epoch_posmean += E_pos.mean().item();epoch_negmean += E_neg.mean().item();
+        scheduler.step()    
+        LOGGER.add_scalar('L',epoch_L,epoch)
+        LOGGER.add_scalar('LCD',epoch_Lcdiv,epoch)
+        LOGGER.add_scalar('LREG',epoch_Lreg,epoch)
+        LOGGER.add_scalar('avg+',epoch_posmean,epoch)
+        LOGGER.add_scalar('avg-',epoch_negmean,epoch)
     torch.save(energy_model.state_dict(),energy_model.save_path)
 
 def Main():
-    model = MNISTEnergy()
+    model = MNISTEBM()
     if not os.path.exists(model.save_path):Train(model)
     model.load_state_dict(torch.load(model.save_path),strict=True)
+    generated  = model.Sample(32,K=1024,sample_buffer_rate=0.0).cpu()
+    im_grid = torchvision.utils.make_grid(torch.stack([generated[i] for i in range(32)],dim=0),nrow=8,padding=2,normalize=True,value_range=(-1,1))
+    plt.imshow(im_grid.permute(1,2,0))
+    plt.show()
 
 if __name__ == '__main__': Main()
