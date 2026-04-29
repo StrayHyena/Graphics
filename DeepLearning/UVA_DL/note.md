@@ -299,3 +299,12 @@ step size = 10
 $\beta_1=0.0$  
 $\beta_2=0.999$  
 lr=1e-4  
+# **7** AutoEncoder
+auto encoder是对一个特征的非线性压缩或降维  
+![](./pics/autoencoder_visualization.svg)  
+Encoder:就像一个一般的CNN一样，把一幅图表示为一个feature vector(in latent space)  
+Decoder:与encoder正好相反,把一个feature vector还原为一幅图。How: use transpose_conv  
+*应用:找相似的图片*  
+给一个图片(比如测试集的一张图片),计算其在latent space的embedding.找到距离其最近的K个embedding,返回其对应的图片。
+
+
