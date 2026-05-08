@@ -306,5 +306,8 @@ Encoder:就像一个一般的CNN一样，把一幅图表示为一个feature vect
 Decoder:与encoder正好相反,把一个feature vector还原为一幅图。How: use transpose_conv  
 *应用:找相似的图片*  
 给一个图片(比如测试集的一张图片),计算其在latent space的embedding.找到距离其最近的K个embedding,返回其对应的图片。
-
-
+# **8** Adversarial Attack  
+以CNN Classifier为例,如何找到一张人类可以轻松辨别的图片但是神经网络却不能正确分类呢？  
+## Fast Gradient Sign Method  
+$\tilde{x} = x + \epsilon \cdot \text{sign}(\nabla_x J(\theta, x, y))$  
+即,对于一个图像，朝着使损失函数增大的方向去改变此图像。第二项就是噪声,  $ \epsilon$控制噪声的强度。
