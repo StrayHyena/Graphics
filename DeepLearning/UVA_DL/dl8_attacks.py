@@ -26,8 +26,10 @@ transform = torchvision.transforms.Compose([
     torchvision.transforms.ToTensor(),torchvision.transforms.Normalize(DATA_MEAN, DATA_STD)
 ])
 dataset = torchvision.datasets.ImageFolder(os.path.join(DATASET_PATH,'TinyImageNet'),transform)
+dataloader = torchvision.utils.data.DataLoader(dataset,BATCH_SIZE,drop_last=True)
 with open(os.path.join(DATASET_PATH,'TinyImageNet','label_list.json'), "r") as f:text_label = json.load(f)
 model = torchvision.models.resnet34(weights=torchvision.models.ResNet34_Weights.IMAGENET1K_V1).to(DEVICE).eval()
+for p in model.parameters():p.requires_grad_(False)
 
 @torch.no_grad()
 def EvaluateAccuracy(k):
@@ -39,20 +41,29 @@ def EvaluateAccuracy(k):
         total+=labels.size(0)
     return correct/total
 
-def FGSM(imgs,labels,epsilon=0.02):
-    for p in model.parameters():p.requires_grad_(False)
-    imgs = imgs.to(DEVICE).requires_grad_(True)
-    F.cross_entropy(model(imgs),labels.to(DEVICE),reduction='sum').backward()
-    return imgs+epsilon* torch.sign( imgs.grad)
-
-def AdversarialPatch(imgs,labels):
-    pass
+def AdversarialPatch(target='goldfish',size=64,epoch_num=10):
+    patch,attack_label = nn.Parameter(torch.zeros((3,size,size),device=DEVICE)), torch.ones((BATCH_SIZE),device=DEVICE)*text_label.index(target)
+    optimizer = optim.AdamW([patch])
+    for epoch in tqdm.tqdm(range(epoch_num)):
+        for imgs,_ in dataloader:
+            imgs = imgs.to(DEVICE)
+            # apply patch
+            for img in imgs:
+                offset_x,offset_y = np.random.randint(0,imgs.shape[-1]-size),np.random.randint(0,imgs.shape[-2]-size)
+                img[:,offset_x:offset_x+size,offset_y+size] = (torch.tanh(patch)+1-2*DATA_MEAN)/(2*DATA_STD)
+            optimizer.zero_grad()
+            F.cross_entropy(model(imgs),attack_label).backward()
+            optimizer.step()
+        
 
 def Main(n=20,k=5,attack_type='FGSM'):
     indices = torch.randint(0,len(dataset),(n,))
     imgs = torch.stack([dataset[i][0] for i in indices])*torch.tensor(DATA_STD).reshape(1,3,1,1)+torch.tensor(DATA_MEAN).reshape(1,3,1,1)
     labels = torch.tensor([dataset[i][1] for i in indices])
-    if attack_type == 'FGSM': imgs = FGSM(imgs,labels)
+    if attack_type == 'FGSM': 
+        imgs = imgs.to(DEVICE).requires_grad_(True)
+        F.cross_entropy(model(imgs),labels.to(DEVICE),reduction='sum').backward()
+        imgs = imgs+0.02* torch.sign( imgs.grad)
     elif attack_type =='patch':imgs = AdversarialPatch(imgs,labels)
     topk_probs,topk_indices = torch.topk( torch.softmax(model(imgs.to(DEVICE)), dim=1),k)
     fig, axes = plt.subplots(4, 5, figsize=(20,10))
