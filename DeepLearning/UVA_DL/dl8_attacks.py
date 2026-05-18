@@ -26,7 +26,7 @@ transform = torchvision.transforms.Compose([
     torchvision.transforms.ToTensor(),torchvision.transforms.Normalize(DATA_MEAN, DATA_STD)
 ])
 dataset = torchvision.datasets.ImageFolder(os.path.join(DATASET_PATH,'TinyImageNet'),transform)
-dataloader = torchvision.utils.data.DataLoader(dataset,BATCH_SIZE,drop_last=True)
+dataloader = torch.utils.data.DataLoader(dataset,BATCH_SIZE,drop_last=True)
 with open(os.path.join(DATASET_PATH,'TinyImageNet','label_list.json'), "r") as f:text_label = json.load(f)
 model = torchvision.models.resnet34(weights=torchvision.models.ResNet34_Weights.IMAGENET1K_V1).to(DEVICE).eval()
 for p in model.parameters():p.requires_grad_(False)
@@ -41,22 +41,31 @@ def EvaluateAccuracy(k):
         total+=labels.size(0)
     return correct/total
 
+# imgs: (B,C,H,W)   patch:(C,H,W)
+def PlacePatch(imgs,patch):
+    for i in range(imgs.shape[0]):
+        x,y = np.random.randint(0,imgs.shape[-2]-patch.shape[-2]),np.random.randint(0,imgs.shape[-1]-patch.shape[-1])
+        imgs[i,:,x:x+patch.shape[-2],y:y+patch.shape[-1]] = (torch.tanh(patch)+1-2*torch.tensor(DATA_MEAN,device=patch.device).reshape(-1,1,1))/(2*torch.tensor(DATA_STD,device=patch.device).reshape(-1,1,1))
 def AdversarialPatch(target='goldfish',size=64,epoch_num=10):
-    patch,attack_label = nn.Parameter(torch.zeros((3,size,size),device=DEVICE)), torch.ones((BATCH_SIZE),device=DEVICE)*text_label.index(target)
-    optimizer = optim.AdamW([patch])
-    for epoch in tqdm.tqdm(range(epoch_num)):
-        for imgs,_ in dataloader:
-            imgs = imgs.to(DEVICE)
-            # apply patch
-            for img in imgs:
-                offset_x,offset_y = np.random.randint(0,imgs.shape[-1]-size),np.random.randint(0,imgs.shape[-2]-size)
-                img[:,offset_x:offset_x+size,offset_y+size] = (torch.tanh(patch)+1-2*DATA_MEAN)/(2*DATA_STD)
-            optimizer.zero_grad()
-            F.cross_entropy(model(imgs),attack_label).backward()
-            optimizer.step()
-        
+    patch,save_path = nn.Parameter(torch.zeros((3,size,size),device=DEVICE)),os.path.join(MODEL_DIR,'AdversarialPatch'+str(size))
+    if not os.path.exists(save_path):
+        optimizer,attack_label = optim.AdamW([patch]), torch.ones((BATCH_SIZE),device=DEVICE,dtype=torch.long)*text_label.index(target)
+        for epoch in tqdm.tqdm(range(epoch_num)):
+            epoch_loss = 0.0
+            for imgs,_ in dataloader:
+                imgs = imgs.to(DEVICE)
+                PlacePatch(imgs,patch)
+                optimizer.zero_grad()
+                loss = F.cross_entropy(model(imgs),attack_label)
+                loss.backward()
+                optimizer.step()
+                epoch_loss+=loss.detach().item()
+            LOGGER.add_scalar('loss',epoch_loss,epoch)
+        torch.save(patch,save_path)
+    patch = torch.load(save_path)
+    return patch
 
-def Main(n=20,k=5,attack_type='FGSM'):
+def Main(n=20,k=5,attack_type='patch'):
     indices = torch.randint(0,len(dataset),(n,))
     imgs = torch.stack([dataset[i][0] for i in indices])*torch.tensor(DATA_STD).reshape(1,3,1,1)+torch.tensor(DATA_MEAN).reshape(1,3,1,1)
     labels = torch.tensor([dataset[i][1] for i in indices])
@@ -64,7 +73,7 @@ def Main(n=20,k=5,attack_type='FGSM'):
         imgs = imgs.to(DEVICE).requires_grad_(True)
         F.cross_entropy(model(imgs),labels.to(DEVICE),reduction='sum').backward()
         imgs = imgs+0.02* torch.sign( imgs.grad)
-    elif attack_type =='patch':imgs = AdversarialPatch(imgs,labels)
+    elif attack_type =='patch':PlacePatch(imgs,AdversarialPatch().cpu())
     topk_probs,topk_indices = torch.topk( torch.softmax(model(imgs.to(DEVICE)), dim=1),k)
     fig, axes = plt.subplots(4, 5, figsize=(20,10))
     for i,ax in enumerate(axes.flatten()):

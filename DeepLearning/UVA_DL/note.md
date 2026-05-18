@@ -74,6 +74,7 @@ CUDA(on my machine)     12.9
 - scatter_add(src,index,dim,dim_size) 返回的维度和dim_size相同
 ## Pytorch Best Pratice
 - 很多关于维度的参数，能用-1,-2就用-1,-2。而不是硬编码，因为有时候会忘记Batch这一个维度，导致你认为的dim不正确
+- LOGGER记录loss一定要用.item()!!!!!!
 # **2** Miscellaneous Topics
 ## Activation Functions
 1.  $\sigma(x) = \frac{1}{1 + e^{-x}}$  
@@ -94,7 +95,14 @@ e^x - 1 & x \le 0
 \end{cases}
 $  
 6. $\text{Swish}(x) = x \cdot \sigma(x)$  
-## Batch Normalization
+## Normalization
+先举一个简单的例子 $x_1,x_2,...x_n \in \mathcal{R} \quad \mu:=mean; \sigma:=std$  
+那么我有两个可学习的参数,$\mu',\sigma'$  
+forward时 
+$$ z = \frac{x- \mu}{\sigma} $$
+$$ y = \sigma'z+\mu' $$
+对于不同的normalization,他们的区别主要是，计算mean/std的维度和数量，可学习参数的维度(利用广播)和数量
+### Batch Normalization
 如果某一层的激活函数之前的输入是(线性层之前的输出)是(m,n)  
 其中m是batch中样本的数量,n是一个样本中特征的数量  
 注意下面不同的i其实是batch中不同的样本  
@@ -104,7 +112,7 @@ $ \hat{x}_i = \frac{x_i - \mu_B}{\sqrt{\sigma_B^2 + \epsilon}} $
 $ y_i​=γ\hat{x}_i​+β  $  
 其中γβ是可学习参数,维度是(n)  
 在推理时,没有batch的概念。$ \mu_B\quad\sigma_B $ 是训练时累计的 running mean / var     
-## Layer Normalization
+### Layer Normalization
 batch norm是不同样本之间同一个特征位置的normalization  
 layer norm是同一个样本不同特征位置的normalization   
 如数据的shape是 (B,C,H,W)  
@@ -310,4 +318,117 @@ Decoder:与encoder正好相反,把一个feature vector还原为一幅图。How: 
 以CNN Classifier为例,如何找到一张人类可以轻松辨别的图片但是神经网络却不能正确分类呢？  
 ## Fast Gradient Sign Method  
 $\tilde{x} = x + \epsilon \cdot \text{sign}(\nabla_x J(\theta, x, y))$  
-即,对于一个图像，朝着使损失函数增大的方向去改变此图像。第二项就是噪声,  $ \epsilon$控制噪声的强度。
+即,对于一个图像，朝着使损失函数增大的方向去改变此图像。第二项就是噪声,  $ \epsilon$控制噪声的强度。  
+注意这里并没有直接用梯度，而是用了梯度的sign (无穷范数)  
+## Adversarial Patch  
+描述:希望对于任意一张被攻击的图，覆盖一个很小的图(so called,patch),就能让model对这个图片判断成一个人为指定的类型(e.g. goldfish)  
+训练出这样的patch也很简单。假设patch是x,指定的类型是y  
+在训练时，把x随机的覆盖到image的一块区域,在计算loss时使用y作为ground truth就行了。 
+这里的随机有如下的方面: 随机位置，随机缩放，随机旋转，随机噪声。    
+# **9** [Normalizing Flows](https://arxiv.org/pdf/1902.00275)
+## 序言  
+假设x是样本点(e.g. MNIST的一幅幅数字图片).我们希望求得x的概率密度$p_x(x)$  
+$p_x(x)$不易求得,但若有$z=f(x)$,且$p_z(z)$已知。此时是否可以求得$p_x(x)$?    
+当然可以:  
+已知 $\int p_z(z)dz=\int p_x(x)dx=1$  
+$$\int p_z(f(x))\left| det\frac{\partial{f(x)}}{\partial{x}}\right|dx=\int p_x(x)dx=1$$
+We have  
+$$ p_x(x) = p_z(f(x))\left| det\frac{\partial{f(x)}}{\partial{x}}\right|$$
+原始的积分换元公式并没有绝对值，绝对值公式严格来说是用于概率密度的无方向积分。  
+注意,这并不是说因为积分值相同所以被积函数也相同，而是通过定义函数相等，来保证积分相等。在 Normalizing Flow 的语境下，逻辑是这样的：
+- 我们观察到数据 $x$，它的真实密度 $p_x(x)$ 是未知的。
+- 我们规定存在一个变换 $f$ 和一个简单分布 $p_z$，并强行令 $p_x(x)$ 的数学表达式就等于那个带雅可比行列式的组合。
+- 因为这个组合本身就满足“全域积分为 1”的性质（这是变量代换公式自带的数学属性），所以这个定义在概率论上是自洽的。
+- 训练过程：我们调整 $f$ 的参数，使得这个定义的 $p_x(x)$ 在观测到的样本点上数值最大（极大似然估计）。即最大化$\log p_x(\mathbf{x}) = \log p_z(f(\mathbf{x})) + \log \left| \det \frac{df(\mathbf{x})}{d\mathbf{x}} \right|$  
+
+但是如果 $f$ 变得越复杂，找到它的逆函数 $f^{-1}$ 以及计算雅可比行列式的对数 $\log \left| \det \frac{df(\mathbf{x})}{d\mathbf{x}} \right|$ 就会越困难。一个更简单的技巧是将多个可逆函数 $f_{1, \dots, K}$ 依次堆叠（串联）在一起，因为它们组合起来仍然代表一个单一的可逆函数。如下图  
+![](./pics/normalizing_flow_layout.webp)  
+真实的数据的概率密度p(x)(x784维向量)显然对于各个元素并不是独立的。  
+但是如果我们假设最后的z的分布pz(z)是标准正态分布的话。这里的潜台词就是各个分量相互独立。  
+**计算**  
+$$\mathbf{z} = f(\mathbf{x}) $$
+大部分情况下,都是**逐元素**的应用函数f.所以jacobian实际上是一个对角矩阵,也可以用一个向量表示j，所以det就是j.prod().取log就是log(j).sum(). (这里没有考虑绝对值)  
+## Dequantization    
+预处理,离散转连续。不影响LDJ(log det jacobian)
+$$x_1 = x_0 + u \quad u \sim U(0,1)  $$
+值域转为[0,1]
+$$x_2 = x_1 / 256  $$
+值域转为(-∞，∞) (实际上，为了防止数值溢出，x3的值域已经在[α/2，1-α/2]了)
+$$x_3 = 0.5\alpha+(1-\alpha)x_2  $$
+$$x_4 = sigmoid^{-1}(x_3)  $$
+**Appendix**  
+$$ y = sigmoid(x) = \frac{1}{1 + e^{-x}}$$
+$$ y′= sigmoid(x)(1−sigmoid(x)) $$
+$$ log|y'| = (-x-2ln(1+e^{-x})).sum()  $$
+$$ x = \text{logit}(y) = sigmoid^{-1}(y) =\ln(y) - \ln(1-y)$$
+$$ x' = \frac{(1-y) + y}{y(1-y)} = \frac{1}{y(1-y)}$$
+$$ log|x'| = (-ln(y)-ln(1-y)).sum()$$
+## Coupling layers
+Backbone
+input z is arbitrarily split into two parts,$z_{1:j}$ and $z_{j+1:d}$  
+$z'_{1:j} = z_{1:j}$  
+$z'_{j+1:d} = \mu_{\theta}(z_{1:j}) + \sigma_{\theta}(z_{1:j}) \odot z_{j+1:d}$   
+![](./pics/coupling_flow.svg)  
+**输入**：$z$，mask $m$  
+m中的1代表的是1:j这部分,即不被改变的部分。所以，1-m代表的是j+1:d这部分    
+shape of z (B,C,H,W)  
+**1. 网络预测变换参数：**
+NN的输入形状仍然是(B,C,H,W),但是有部分被mask成0了。  
+$$[\mathbf{s}, \mathbf{t}] = \text{NN}(z \odot m)$$
+shape of s,t (B,C,H,W)  
+**2. 稳定化缩放（scaling_factor $\alpha$）：**
+$$\mathbf{s} = \tanh\!\left(\frac{\mathbf{s}}{e^{\alpha}}\right) \cdot e^{\alpha}$$
+**3. 对非 mask 部分施加 mask：**
+$$\mathbf{s} = \mathbf{s} \odot (1 - m)$$
+$$\mathbf{t} = \mathbf{t} \odot (1 - m)$$
+**4. 仿射变换：**
+$$z' = z \odot e^{\mathbf{s}} + \mathbf{t}$$
+**5. Log-determinant Jacobian：**
+$$\text{ldj} = \sum \mathbf{s}$$
+--- 
+**最后,我们再仔细过一遍**  
+- 理论公式  
+ $z=[z_1:z_2]$  
+ $z_1' = z_1$    
+ $z_2' = \mu(z_1) + \sigma(z_1) \odot z_2$   
+ $z'=[z_1':z_2']$  
+ $\Rightarrow$
+ $$\frac{\partial z'}{\partial z} = \begin{bmatrix} I & 0 \\ \frac{\partial z_2'}{\partial  z_1} & \text{diag}(\sigma(z_1)) \end{bmatrix}$$
+ $$ ldj = \sigma(z_1).sum() $$
+- 实践代码
+$$M_1 = \{ \underbrace{1, 1, \dots, 1}_{j \text{ 个}}, 0, \dots, 0 \}$$
+$$M_2 = 1 - M_1 = \{ 1, 1, \dots, 1, \underbrace{0, \dots, 0 }_{d-j \text{ 个}}\}$$
+$$[\mathbf{s}, \mathbf{t}] = \text{NN}(z \odot M_1)$$
+$$z' = z \odot e^{\tanh\!\left(\frac{\mathbf{s}}{e^{\alpha}}\right) \cdot e^{\alpha}} \odot M_2 + t \odot M_2$$
+虽然NN输入的维度和理论公式那里不一致(即后面被append了一些0),但这其实不会影响到0所对应的权重的更新,也不会影响输出。  
+### Mask是怎样的？
+![](./pics/checkerboard_mask.svg)  
+第一层coupling layer用左图  
+第二层coupling layer用右图  
+第三层coupling layer用左图  
+第四层coupling layer用右图  
+etc
+### NN是怎样的？
+- ContactELU: x ==> [elu(x),elu(-x)]
+- LayerNormChannel: 计算(B,H,W)个均值方差,可学习参数mean C个,std C个
+- GatedConv  
+![](./pics/GatedConv.png)  
+>NN的结构如下------------------------------------------  
+Conv2d (C_in ==>  C_hidden)  
+m个---|  
+$\quad\quad$ | GatedConv  (C_hidden ==> C_hidden)  
+$\quad\quad$ | LayerNormChannel   
+ContactELU  (C_hidden ==> 2C_hidden)  
+Conv2d (2C_hidden ==>  C_out)  
+
+注意初始化时，需要让最后的Conv2d的weight/bias是0，这样让整个 flow 在训练开始时是恒等变换。
+即s=1,t=0, z'=z 初始时数据直接穿过所有 flow 层到达先验，不会在第一步就产生极端的 likelihood 值导致梯度爆炸
+## Multi-scale architecture  
+我们嫌目前训练的参数多，训练时间长。怎么缓解？  
+![](./pics/Squeeze_operation.svg)  
+把图像重新排布(这并不是简单的reshape)
+![](./pics/multiscale_flow.svg)   
+之后令一半(通道维度)的图像继续进Coupling layer  
+另一半直接估计概率(推理/生成的时候这一半也直接从标准正态中采样)      
+
+
